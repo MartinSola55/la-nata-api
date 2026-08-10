@@ -1,0 +1,8 @@
+root = true
+
+[*.cs]
+indent_style = space
+indent_size = 4
+
+# CS8765: Nullability of type of parameter doesn't match overridden member.
+dotnet_diagnostic.CS8765.severity = none
