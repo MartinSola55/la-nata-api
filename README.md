@@ -1,8 +1,10 @@
-# Template API
+# La Ñata API
 
-.NET 10 Web API template for business microservices.
+.NET 10 Web API for **La Ñata** — rental of chairs, tables, tableware, linen and furniture.
 
-This project is intended to be copied as the starting point for a new business API. It includes the common backend pieces used across the reference APIs: authentication, role authorization, SQL script migrations, startup seed data, thin controllers, service-based business logic, and a small generic CRUD module.
+This is the backend rewrite of the legacy ASP.NET MVC 5 application (`La_Nata`). It keeps the same business rules and the same Spanish user-facing messages, but exposes them as a JSON API with JWT authentication, an audit trail, and generated PDF/CSV/XLSX documents instead of Razor print views. The web frontend is a separate project and does not exist yet.
+
+**It runs against the existing production database.** The schema is not ours to redesign: the entities map onto the legacy tables through `[Table]` and `[Column]` attributes, and the only DDL the API ever runs is additive — the audit columns and a separate `audit` schema. Nothing existing is altered, renamed or dropped.
 
 ## Stack
 
@@ -11,20 +13,18 @@ This project is intended to be copied as the starting point for a new business A
 - Entity Framework Core with SQL Server
 - JWT bearer authentication
 - SQL files for migrations
+- QuestPDF for reports, SpreadCheetah for spreadsheets
 
 ## Project Structure
 
-The project is grouped into libraries by business area. They are folders inside the single `Template-Api` project, and namespaces mirror them (`Template_Api.<Library>.<Layer>`).
+The project is grouped into libraries by business area. They are folders inside the single `LaNata-Api` project, and namespaces mirror them (`LaNata_Api.<Library>.<Layer>`).
 
 ```text
-Template-Api/
-  Core/                 Users, roles, auth, generic CRUD examples, DbContext, and shared DTOs/constants.
+LaNata-Api/
+  Core/                 Products, orders, expenses, dashboard, users, roles, auth, DbContext, shared DTOs/constants.
   Audit/                Audit trail: AuditableEntity, AuditInterceptor and the audit schema.
   Export/               CSV and XLSX generation.
   Report/               PDF generation.
-  Emailing/             SMTP sending and email templates.
-  WhatsApp/             WhatsApp provider integration.
-  MercadoPago/          Mercado Pago Checkout Pro integration.
   Program.cs            Composition root and middleware pipeline.
   appsettings.json
 ```
@@ -38,115 +38,219 @@ Every library repeats the same inner layout, creating only the folders it needs:
     DB/                 EF Core DbContext and DatabaseConfig.
     Filters/            Global query filters.
   Helpers/              Generic helper classes.
+    Documents/          Custom QuestPDF documents for this library's features.
     Interceptors/       EF Core SaveChanges interceptors.
   Models/               Database entities only — one class per table.
     Constants/          Reusable constants.
     DTO/                Controller request and response contracts.
-    Internal/           Everything else: options, service inputs and outputs, enums.
+    Internal/           Everything else: service inputs and outputs, report rows, enums.
   Security/
-    Config/             Startup configuration modules (CORS, authentication, authorization, rate limiting, security headers, AWS).
-  Services/             Business logic and integrations.
+    Config/             Startup configuration modules (CORS, authentication, authorization, rate limiting, security headers).
+  Services/             Business logic.
 ```
 
 All SQL migrations live together in `Core/DAL/Migrations`, whichever library owns the tables they touch.
 
-## Included Features
+## Domain
 
-- Custom `User` and `Role` models.
-- JWT login and authenticated logout.
-- Role-based policies: `Admin` and `User`.
-- Default roles and admin user seeded via SQL migration.
-- SQL migration runner using the `_Migrations` table.
-- `AuditInterceptor` EF Core interceptor that stamps `CreatedBy`, `UpdatedAt`/`UpdatedBy`, and `DeletedBy` on every `AuditableEntity`, taking the user from the JWT.
-- Explicit audit trail in the `audit` schema, with a generic change-list builder (see [Audit](#audit)).
-- Generic CSV/XLSX export and PDF reporting, consumable from any service (see [Export](#export) and [Report](#report)).
-- Generic CRUD example with `GenericItem`.
-- Product CRUD example with price and stock.
-- Cart and cart product checkout example with item price snapshots.
-- AWS S3 file upload, signed URL, and delete service.
-- WhatsApp text sending service with message status constants.
-- Email template rendering service.
-- Mercado Pago Checkout Pro preference creation and webhook processing.
-- Configurable CORS, response security headers, HSTS, and IP-based rate limiting (see [Security](#security)).
+The C# names are readable; the columns underneath are the legacy ones:
+
+| Entity | Table | Notes |
+|---|---|---|
+| `Product` | `Product` | `description`, `stock` (bigint), `price`, `break_price` |
+| `Order` | `Order` | `client_name`, `phone`, `event_adress` (legacy typo kept in the column), `date`, `shipment_price`, `observation` |
+| `ProductOrder` | `ProductOrder` | join table, keyed by `(id_product, id_order, unit_price)` |
+| `Expense` | `Expense` | `date`, `description`, `price` |
+| `Role` | `Rol` | two rows: `Administrador` and `Empleado` |
+| `User` | `User` | `email`, `password`, `id_rol` — there are no name columns |
+
+`Product`, `Order`, `Expense` and `User` inherit `AuditableEntity`, so every row is soft deleted and carries who created, edited and deleted it. `ProductOrder` does not: it is a join table with no `deleted_at`, and the app hard deletes from it exactly as the legacy did.
+
+### Money is `double`, not `decimal`
+
+Every price column in the production schema is `float`. Mapping `decimal` onto it would round silently on every write, so the entities and DTOs use `double`. This is the one place where the code follows the database instead of good practice — changing the columns to `decimal(18,2)` is the fix, and it is a schema migration nobody has authorised.
+
+### Event dates carry a time
+
+The legacy stored every event day at **12:00**, an artefact of adding 12 hours to dodge a timezone problem in its date input. All 2200 existing rows have it, so new rows keep the same time and the column stays homogeneous.
+
+The consequence matters more than the cause: **every date filter is a half-open day range**, never an equality check. `x.Date >= day && x.Date < day.AddDays(1)`.
+
+### Deleted products still belong to old orders
+
+40 of the 274 products are soft deleted, and 170 order lines across 164 orders point at them. The global soft-delete query filter turns a naive `Include(x => x.Products).ThenInclude(x => x.Product)` into a join that **drops those lines**, under-reporting both the line count and the order total.
+
+`OrderService.LoadLineProducts` is the answer: it resolves the products behind an order's lines with `IgnoreQueryFilters()`. Anything that reads an order's lines has to go through it — `GetOne`, `Report`, `RemoveProduct` and the date-change validation all do.
+
+### Stock is per event date, not global
+
+`Product.Stock` is the size of the catalogue, not what is free. What matters is availability **on the day of an event**: the stock minus everything the orders of that same date already reserve. This is the single rule the whole ordering flow is built on, and it is what `POST /api/Product/GetStock` answers:
+
+```json
+{ "date": "2026-09-15" }
+```
+
+```json
+{ "id": 1, "description": "Silla plastica blanca",
+  "stock": 100, "reservedStock": 50, "availableStock": 50 }
+```
+
+Pass `excludeOrderId` while editing an order so its own reservation is not counted against it.
+
+Every write path re-checks availability server-side: creating an order, adding a product to one, and moving an order to another date.
+
+### One product can appear twice in an order
+
+`ProductOrder` is keyed by `(id_product, id_order, unit_price)`, so the same product can be reserved twice at different prices — the price a client was quoted before a price change, plus the current one.
+
+**The price identifies the line**: `AddProduct` without `unitPrice` merges into (or opens) the line at the current catalogue price, and with `unitPrice` it targets the line at that price. `RemoveProduct` takes the price too — removing the whole reserved quantity hard deletes the row, anything less subtracts. There is no `deleted_at` on this table, so a removal is physical, exactly as the legacy did it.
+
+Deleting an order only stamps `deleted_at` on the order itself. Its lines stay, and the stock they reserved is released anyway because every availability query reaches them through `Order`.
+
+### Text normalization
+
+The legacy app normalized every free text field on the way in, and so does this one (`Core/Helpers/TextHelper.cs`), because product descriptions are unique by text and reports must print consistently:
+
+| Field | Rule | Example |
+|---|---|---|
+| Client name | letters only, title case | `juan PEREZ` → `Juan Perez` |
+| Description, address, observation | letters and digits, first letter upper | `silla PLASTICA blanca` → `Silla plastica blanca` |
+| Phone | digits only | `(03404) 42-0949` → `03404420949` |
+
+## Endpoints
+
+All endpoints require a bearer token; `POST /api/Auth/Login` is the only public one. This matches the legacy `[Security]` filter, which protected every controller except `Login`.
+
+```http
+POST /api/Auth/Login
+POST /api/Auth/Logout
+
+GET  /api/Dashboard/Get                 Product count
+
+GET  /api/Product/GetCombo
+POST /api/Product/GetAll                Search by description
+GET  /api/Product/GetOne
+POST /api/Product/Create
+POST /api/Product/Update
+POST /api/Product/Delete
+POST /api/Product/GetStock              Availability for an event date
+POST /api/Product/Report                PDF price list
+POST /api/Product/ExportCsv
+POST /api/Product/ExportExcel
+
+POST /api/Order/GetAll                  By day, or by date range
+GET  /api/Order/GetOne                  Detail with lines and totals
+POST /api/Order/Create                  Header + product list in one call
+POST /api/Order/Update                  Header only
+POST /api/Order/Delete
+POST /api/Order/GetDates                Days holding orders, for the calendar
+POST /api/Order/AddProduct
+POST /api/Order/RemoveProduct
+POST /api/Order/Report                  PDF detail, with or without prices
+POST /api/Order/Budget                  PDF quote for an order not yet created
+POST /api/Order/ExportCsv
+POST /api/Order/ExportExcel
+
+POST /api/Expense/GetAll                By date range
+GET  /api/Expense/GetOne
+POST /api/Expense/Create
+POST /api/Expense/Update
+POST /api/Expense/Delete
+POST /api/Expense/GetBalance            Expenses, income and profit between two dates
+POST /api/Expense/Report                PDF balance
+POST /api/Expense/ExportCsv
+POST /api/Expense/ExportExcel
+
+POST /api/User/...                      User management (admin)
+POST /api/Audit/GetAll                  Audit trail (admin)
+```
+
+Listings return the **whole filtered set**, unsorted pagination aside, exactly as the legacy screens did. `GetAllRequest` extends `SortRequest` (`ColumnSort` + `SortDirection`); leaving `ColumnSort` unset keeps each listing's natural order. Users and the audit trail do paginate and extend `PaginateRequest` instead.
+
+### How the legacy maps onto it
+
+| Legacy | Now |
+|---|---|
+| `Orders/Index?date=` | `POST /Order/GetAll` with `date` |
+| `Orders/OrdersDates` | `POST /Order/GetDates` |
+| `Orders/Create` + `AddProducts` + session basket | `POST /Order/Create` — the whole order in one call |
+| `Orders/AddToExistingOrder` | `POST /Order/AddProduct` |
+| `Orders/RemoveFromExistingOrder` | `POST /Order/RemoveProduct` |
+| `Orders/ReportWithPrice` / `ReportWithoutPrice` | `POST /Order/Report` with `withPrice` |
+| `Orders/ReportBudget` | `POST /Order/Budget` |
+| `Products/ProductsStock` | `POST /Product/GetStock` |
+| `Products/Print` | `POST /Product/Report` |
+| `Expenses/Print` (balance) | `POST /Expense/Report` and `POST /Expense/GetBalance` |
+| `Home/Index` product count | `GET /Dashboard/Get` |
+
+The session-based basket is gone: an order arrives complete, which also removes the legacy failure mode where a lost session dropped a half-built order. Stock checks that the legacy trusted the client for (`real_stock`, `stock` query parameters) are now computed on the server.
 
 ## Configuration
 
-Update [appsettings.json](Template-Api/appsettings.json) before using the template in a real project.
-
-Important settings:
+Update [appsettings.json](LaNata-Api/appsettings.json) per environment.
 
 ```json
 {
   "Cors": {
-    "AllowedOrigins": "https://localhost:3000"
+    "AllowedOrigins": "http://localhost:3000;https://localhost:3000"
   },
   "ConnectionStrings": {
-    "APIContextConnection": "Server=localhost;Database=TemplateApi;Integrated Security=True;Trusted_Connection=True;Encrypt=false;MultipleActiveResultSets=true"
+    "APIContextConnection": "Server=localhost;Database=LaNata;Integrated Security=True;Trusted_Connection=True;Encrypt=false;MultipleActiveResultSets=true"
   },
   "Database": {
     "RunSqlMigrations": true
   },
-  "Jwt": {
-    "Issuer": "TemplateApi",
-    "Audience": "TemplateApi",
-    "Key": "CHANGE_ME_TemplateApi_JwtKey_AtLeast32Chars"
+  "Reporting": {
+    "License": "Community",
+    "EnableDebugging": false
   },
-  "Aws": {
-    "Enabled": false,
-    "BucketName": "",
-    "AccessKey": "",
-    "SecretKey": "",
-    "Region": "",
-    "SignedUrlMinutes": 15
+  "Jwt": {
+    "Issuer": "LaNata",
+    "Audience": "LaNata",
+    "Key": "CHANGE_ME_AT_LEAST_32_CHARS_AND_MORE"
   }
 }
 ```
 
-- `Cors:AllowedOrigins` — semicolon-separated list of allowed browser origins. **Required**: the app does not start if it is empty. Only `GET` and `POST` are allowed.
-- `Aws:Enabled` — turns S3 on. While it is `false` the file service is a no-op, so local development needs no bucket. When it is `true`, `Aws:BucketName` and `Aws:Region` are **required** and the app does not start without them.
-- `Aws:AccessKey` / `Aws:SecretKey` — leave them empty in any environment that provides an IAM role (App Service, EC2, ECS). Empty keys let the SDK use its credential chain; setting them overrides it.
-- Secrets (`Jwt:Key`, `Aws:AccessKey`, `Aws:SecretKey`, `EmailOptions:Password`, `MercadoPagoOptions:AccessToken`, `WhatsAppOptions:ApiKey`) must be supplied per environment through environment variables or user-secrets — never committed. Use the `__` separator for nested keys, e.g. `MercadoPagoOptions__AccessToken`.
+- `Cors:AllowedOrigins` — semicolon-separated list of allowed browser origins. **Required**: the app does not start if it is empty. Only `GET` and `POST` are allowed, and `Content-Disposition` is exposed so a browser can read the file name of a download.
+- `Jwt:Key` must be supplied per environment through environment variables or user-secrets — never committed. Use the `__` separator for nested keys, e.g. `Jwt__Key`.
 
-Do not keep the default JWT key in production. The first admin user is seeded by `03_Seed_Initial_Data.sql` with email `admin@localhost` and password `Password1!` &mdash; rotate the password (and ideally the email) before deploying anywhere non-local.
-
-## Security
-
-Startup configuration is split into modules under [Core/Security/Config](Template-Api/Core/Security/Config) (`CorsConfig`, `AuthenticationConfig`, `AuthorizationConfig`, `RateLimitConfig`, `SecurityHeadersConfig`) plus [DatabaseConfig](Template-Api/Core/DAL/DB/DatabaseConfig.cs); `Program.cs` only wires them together and declares the middleware pipeline.
-
-- CORS is restricted to the origins in `Cors:AllowedOrigins`, methods `GET` and `POST`.
-- Security headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Content-Security-Policy`, `Cache-Control: no-store`, …) are applied by `Core/Security/Config/SecurityHeadersConfig.cs`.
-- HSTS and HTTPS metadata validation for JWT bearer are enabled outside Development.
-- The Kestrel `Server` response header is disabled.
-- Rate limiting (`Microsoft.AspNetCore.RateLimiting`, partitioned by client IP): a 300 req/min global limit, and a 10 req/5 min limit on `POST /api/Auth/Login` (`RateLimitPolicies.Login`). Rejections return `429` with the standard `BaseResponse` error shape.
-  - The partition key is `HttpContext.Connection.RemoteIpAddress`. This is the real client IP when Kestrel is exposed directly and when hosting on Azure App Service / IIS (the ASP.NET Core Module propagates it). If a CDN or reverse proxy is ever put in front (Cloudflare, nginx), add `UseForwardedHeaders` first — otherwise every request shares the proxy address and one limit is spent by all users at once.
+This points at the **live** database. Take a backup before the first run: startup applies the audit-column migration.
 
 ## First Run
 
 From the repository root:
 
 ```powershell
-dotnet build Template-Api.sln
-dotnet run --project Template-Api/Template-Api.csproj
+dotnet build LaNata-Api.sln
 ```
 
-Before running, create the SQL Server database named in `APIContextConnection`.
+```powershell
+dotnet run --project LaNata-Api/LaNata-Api.csproj
+```
 
 On startup, the app will:
 
-- Ensure the `_Migrations` table exists.
-- Run pending SQL scripts from `Template-Api/Core/DAL/Migrations` (this includes role and admin user seeding).
+- Create the `_Migrations` table if it is missing.
+- Run pending SQL scripts from `LaNata-Api/Core/DAL/Migrations`.
+
+Both migrations are additive and idempotent: every statement is guarded by `IF COL_LENGTH(...) IS NULL` or `IF NOT EXISTS`, so a second run is a no-op. No existing table, column or row is altered.
+
+To rehearse it first, restore a copy and run against that:
+
+```powershell
+sqlcmd -S localhost -E -C -Q "BACKUP DATABASE [LaNata] TO DISK = N'C:\temp\LaNata.bak' WITH INIT, COPY_ONLY, COMPRESSION"
+```
 
 ## Auth
-
-Login endpoint:
 
 ```http
 POST /api/Auth/Login
 Content-Type: application/json
 
 {
-  "email": "admin@localhost",
-  "password": "Password1!"
+  "email": "nicolamagni@hotmail.com",
+  "password": "..."
 }
 ```
 
@@ -156,23 +260,59 @@ Use the returned JWT as a bearer token:
 Authorization: Bearer <token>
 ```
 
+Roles are `Administrador` and `Empleado` — the text already sitting in the `Rol` table, which is what travels in the JWT role claim. The business endpoints only require authentication, matching the legacy behaviour where every logged-in user could manage products, orders and expenses; user administration and the audit trail are admin-only.
+
+### Existing passwords must be reset once
+
+Passwords are hashed with BCrypt. The legacy stored **unsalted SHA-256 hex**, which BCrypt cannot verify, so every pre-existing user needs a new hash before they can log in. `AuthService.VerifyPassword` treats a legacy hash as a failed login rather than throwing.
+
+The `password` column stays `char(64)`. A BCrypt hash is 60 characters, so it fits, but SQL Server pads every read back to 64 — `VerifyPassword` trims before verifying. Do not compare the column directly.
+
+Generate a BCrypt hash with any tool that produces the standard `$2a$`/`$2b$` format, then apply it:
+
+```sql
+UPDATE [dbo].[User] SET [password] = '<hash>' WHERE [email] = 'nicolamagni@hotmail.com';
+```
+
+After that first reset, `POST /api/User/UpdatePassword` handles rotations normally, and new users created through `POST /api/User/Create` are hashed by the API.
+
+## Security
+
+Startup configuration is split into modules under [Core/Security/Config](LaNata-Api/Core/Security/Config) (`CorsConfig`, `AuthenticationConfig`, `AuthorizationConfig`, `RateLimitConfig`, `SecurityHeadersConfig`) plus [DatabaseConfig](LaNata-Api/Core/DAL/DB/DatabaseConfig.cs); `Program.cs` only wires them together and declares the middleware pipeline.
+
+- CORS is restricted to the origins in `Cors:AllowedOrigins`, methods `GET` and `POST`.
+- Security headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Content-Security-Policy`, `Cache-Control: no-store`, …) are applied by `Core/Security/Config/SecurityHeadersConfig.cs`.
+- HSTS and HTTPS metadata validation for JWT bearer are enabled outside Development.
+- The Kestrel `Server` response header is disabled.
+- Rate limiting (partitioned by client IP): a 300 req/min global limit, and a 10 req/5 min limit on `POST /api/Auth/Login` (`RateLimitPolicies.Login`). Rejections return `429` with the standard `BaseResponse` error shape.
+  - The partition key is `HttpContext.Connection.RemoteIpAddress`. This is the real client IP when Kestrel is exposed directly and when hosting on Azure App Service / IIS. If a CDN or reverse proxy is ever put in front, add `UseForwardedHeaders` first — otherwise every request shares the proxy address and one limit is spent by all users at once.
+
 ## Migrations
 
-All migrations are plain SQL scripts under a single folder, whichever library owns the tables they touch:
+All migrations are plain SQL scripts under a single folder:
 
 ```text
-Template-Api/Core/DAL/Migrations
+LaNata-Api/Core/DAL/Migrations
+  01_Audit_Columns.sql        ALTER TABLE ... ADD on User, Product, Order, Expense
+  02_Audit_Schema.sql         The audit schema, its two catalogs and the entry table
 ```
 
-Naming convention:
+Scripts are executed in filename order. Each executed filename is stored in `_Migrations`, so each script runs once. New scripts keep the numeric prefix (`03_Add_New_Feature.sql`).
 
-```text
-01_Initial.sql
-02_Emailing.sql
-03_Add_New_Feature.sql
-```
+What `01_Audit_Columns.sql` adds, and nothing else:
 
-Scripts are executed in filename order. Each executed filename is stored in `_Migrations`, so each script runs once.
+| Table | Added |
+|---|---|
+| `User` | `created_at`, `updated_at`, `deleted_at`, `created_by`, `updated_by`, `deleted_by` |
+| `Product` | `updated_at`, `created_by`, `updated_by`, `deleted_by` |
+| `Order` | `updated_at`, `created_by`, `updated_by`, `deleted_by` |
+| `Expense` | `created_at`, `updated_at`, `created_by`, `updated_by`, `deleted_by` |
+
+`Product.created_at`, `Product.deleted_at`, `Order.created_at`, `Order.deleted_at` and `Expense.deleted_at` were already there and are left alone. `ProductOrder` and `Rol` are not touched at all.
+
+The three tables in `02_Audit_Schema.sql` live in their own `audit` schema, so they add no columns, indexes or triggers to anything operational. Dropping the schema reverts them completely.
+
+> New rows stamp `created_at` in **UTC**, while the legacy wrote Argentina local time (`UtcNow.AddHours(-3)`). Rows written before and after the cutover differ by three hours on that column. It is not surfaced anywhere in the app, but it matters if you ever query `created_at` directly.
 
 ## Audit
 
@@ -183,36 +323,22 @@ The `Audit` library covers two separate needs.
 **What changed and when** is explicit and lives in the `audit` schema:
 
 ```text
-audit.AuditCategory   Groups actions (Seguridad, Datos, Pagos, Notificaciones).
-audit.AuditAction     Action catalog (CREATED, UPDATED, LOGIN, PAYMENT_CREATED, …).
+audit.AuditCategory   Groups actions (Seguridad, Datos, Documentos).
+audit.AuditAction     Action catalog (CREATED, UPDATED, DELETED, PRODUCT_ADDED, EXPORTED, …).
 audit.AuditEntry      One row per audited operation, with before/after snapshots.
 ```
 
 Nothing is recorded automatically. A service records an entry by calling `AuditService.Audit(...)`, and **only the fields it registers** are compared and stored:
 
 ```csharp
-public class ProductService(APIContext context, AuditService auditService)
+private static AuditChangeSet BuildAuditChanges(AuditChangeList<Product> changeList)
 {
-    private static AuditChangeSet BuildAuditChanges(AuditChangeList<Product> changeList)
-    {
-        return changeList
-            .AddField(x => x.Name, "Nombre")
-            .AddField(x => x.Price, "Precio", AuditFormat.Currency)
-            .AddField(x => x.IsActive, "Estado", AuditFormat.ActiveInactive)
-            .Build();
-    }
-
-    private async Task Audit(string actionCode, Product product, AuditChangeSet changes)
-    {
-        await _auditService.Audit(new AuditRequest
-        {
-            ActionCode = actionCode,
-            Entity = AuditEntityCode.PRODUCT,
-            EntityKey = product.Id.ToString(),
-            Name = product.Name,
-            Changes = changes
-        });
-    }
+    return changeList
+        .AddField(x => x.Description, "Descripción")
+        .AddField(x => x.Stock, "Stock")
+        .AddField(x => x.Price, "Precio", AuditFormat.Currency)
+        .AddField(x => x.BreakPrice, "Precio por rotura", AuditFormat.Currency)
+        .Build();
 }
 ```
 
@@ -229,11 +355,11 @@ await Audit(AuditActionCode.DELETED, product, BuildAuditChanges(AuditChangeList.
 ```json
 {
   "Summary": [
-    { "Field": "Price", "FieldName": "Precio", "PreviousValue": "$1,000.00", "UpdatedValue": "$1,250.50",
-      "Description": "Se modificó Precio de «$1,000.00» a «$1,250.50»." }
+    { "Field": "Price", "FieldName": "Precio", "PreviousValue": "$500.00", "UpdatedValue": "$550.00",
+      "Description": "Se modificó Precio de «$500.00» a «$550.00»." }
   ],
-  "State":   { "Name": "Agua 500ml",  "Price": "$1,000.00", "IsActive": "Activo" },
-  "Payload": { "Name": "Agua 500 ml", "Price": "$1,250.50", "IsActive": "Activo" }
+  "State":   { "Description": "Silla plastica blanca", "Stock": "100", "Price": "$500.00" },
+  "Payload": { "Description": "Silla plastica blanca", "Stock": "100", "Price": "$550.00" }
 }
 ```
 
@@ -244,6 +370,8 @@ Builder methods:
 | `AddField(x => x.Prop, "Label", format)` | Scalar properties. `AuditFormat` handles dates, currency, percentages, yes/no, active/inactive. |
 | `AddLookup(x => x.RoleId, resolver, "Rol")` | Foreign keys and codes; the resolver returns the text the user should read. |
 | `AddCollection<TItem>(x => x.Items, x => x.Id, x => x.Name, "Productos")` | Collections; reports items added and removed, compared by key. |
+
+Order lines are not diffed through the change list: `AddProduct` and `RemoveProduct` write their own `PRODUCT_ADDED` / `PRODUCT_REMOVED` entries carrying the product, quantity and unit price, which reads better than a collection diff.
 
 Reading the trail (admin only): `POST /api/Audit/GetAll`, `GET /api/Audit/GetOne`, `GET /api/Audit/GetFilters`.
 
@@ -261,11 +389,9 @@ Notes:
 var columns = ExportColumns
     .For<Product>()
     .Add(x => x.Id, "Id", ExportValueFormat.Integer)
-    .Add(x => x.Name, "Nombre")
+    .Add(x => x.Description, "Producto", width: 45)
+    .Add(x => x.Stock, "Stock", ExportValueFormat.Integer)
     .Add(x => x.Price, "Precio", ExportValueFormat.Currency)
-    .Add("Estado", x => x.IsActive, ExportValueFormat.YesNo)
-    .Add(x => x.CreatedAt, "Creado", ExportValueFormat.DateTime)
-    .AddIf(App.IsAdmin, x => x.Cost, "Costo", ExportValueFormat.Currency)
     .Build();
 
 var rs = await _exportService.Export(ExportFileFormat.Excel, new ExportRequest<Product>
@@ -277,8 +403,6 @@ var rs = await _exportService.Export(ExportFileFormat.Excel, new ExportRequest<P
 });
 ```
 
-`ExportFile` carries `FileName`, `ContentType` and `Content` (bytes), so it can be returned as a download, attached to an email, or uploaded through `AwsS3Service`.
-
 | Method | Output |
 |---|---|
 | `ToCsv(rq)` | UTF-8 CSV with BOM, `;` delimiter by default |
@@ -286,7 +410,7 @@ var rs = await _exportService.Export(ExportFileFormat.Excel, new ExportRequest<P
 | `Export(format, rq)` | Either of the above, format chosen at runtime |
 | `ToExcelWorkbook(rq)` | Multi-sheet XLSX |
 
-`ExportValueFormat` drives both outputs: in CSV it picks the text, in XLSX it also picks the **cell type**, so numbers and dates arrive as real numbers and dates and stay sortable. Use `Text` for codes that must keep their leading zeros.
+`ExportValueFormat` drives both outputs: in CSV it picks the text, in XLSX it also picks the **cell type**, so numbers and dates arrive as real numbers and dates and stay sortable. Use `Text` for codes that must keep their leading zeros — phone numbers use it.
 
 Two details worth knowing:
 
@@ -295,48 +419,37 @@ Two details worth knowing:
 
 ## Report
 
-`ReportService` generates PDFs with [QuestPDF](https://www.questpdf.com/). For a listing, no PDF code is needed:
+`ReportService` generates PDFs with [QuestPDF](https://www.questpdf.com/), replacing the legacy Razor print views. For a listing, no PDF code is needed:
 
 ```csharp
 var columns = ReportColumns
     .For<Product>()
-    .AddFixed(x => x.Id.ToString(), "Id", 30, ReportAlignment.Center)
-    .Add(x => x.Name, "Producto", width: 3)
+    .Add(x => x.Description, "Producto", width: 4)
     .AddCurrency(x => x.Price, "Precio")
-    .AddYesNo(x => x.IsActive, "Activo")
+    .AddCurrency(x => x.BreakPrice, "Precio por rotura")
     .Build();
 
 var rs = _reportService.GenerateTable(new ReportTableRequest<Product>
 {
-    FileName = "productos",
+    FileName = "listado_de_productos",
     Columns = columns,
     Rows = products,
     Options = new ReportOptions
     {
-        Title = "Listado de productos",
-        Subtitle = "Catálogo con precios y stock vigentes",
-        Filters = [new("Búsqueda", "agua"), new("Estado", "Activos")],
-        Summary = [new("Productos", "3"), new("Sin stock", "1")],
+        Title = CompanyInfo.Name,
+        Subtitle = "Listado de productos",
+        FooterNote = CompanyInfo.FooterNote
     }
 });
 ```
 
-The generated page carries a header with the title and optional logo, the applied filters, summary cards, the table with a repeating header, and a footer with the generation stamp and page numbers. `ReportOptions` covers orientation, page size (A4/Letter/Legal), margins, author and footer note.
+The generated page carries a header with the title, the applied filters, summary cards, the table with a repeating header, and a footer with the generation stamp and page numbers. Company details printed on every report live in `Core/Models/Constants/CompanyInfo.cs`.
 
-For a layout the table report cannot express, inherit `ReportDocumentBase` — it owns the page setup, header and footer, leaving only `ComposeContent` to implement — and pass it to `ReportService.Generate(document, fileName)`. `ReportService.Merge` renders several documents into one PDF.
+The order detail uses the same table report for both variants: `ReportColumns.AddIf` drops the price columns when `withPrice` is `false`, and the shipment is rendered as one more row (`OrderReportRow`), exactly as the legacy view did.
 
-Configuration:
+The balance is the one report a table cannot express — it stacks the expenses table and the income table in one document — so it inherits `ReportDocumentBase` in `Core/Helpers/Documents/BalanceReportDocument.cs` and is passed to `ReportService.Generate(document, fileName)`. `ReportService.Merge` renders several documents into one PDF.
 
-```json
-{
-  "Reporting": {
-    "License": "Community",
-    "EnableDebugging": false
-  }
-}
-```
-
-> **Licensing:** QuestPDF is dual-licensed. The Community license is free only below the vendor's revenue threshold; above it, a paid license is required. Review this before shipping a product built on this template.
+> **Licensing:** QuestPDF is dual-licensed. The Community license is free only below the vendor's revenue threshold; above it, a paid license is required. Review this before shipping.
 
 ## Downloading Documents
 
@@ -354,167 +467,41 @@ public async Task<IActionResult> ExportExcel([FromBody] GetAllRequest rq)
 }
 ```
 
-Worked examples live in `ProductController`: `ExportCsv`, `ExportExcel` and `Report`. All three cover the whole filtered set rather than the current page.
+Documents cover the whole filtered set rather than the current page.
 
 Every successful generation is audited under the `DOCUMENT` category — `EXPORTED` for CSV/XLSX, `REPORT_GENERATED` for PDF — because knowing who took which data out of the system is exactly what an audit trail is for. There is no before/after to compare, so the entry records the file name, the format, the row count and the filters that produced it:
 
 ```json
 {
-  "Archivo": "productos_20260809_0154.xlsx",
-  "Formato": "Excel",
-  "Registros": 15,
-  "Búsqueda": "agua",
-  "Estado": "Activos"
+  "Archivo": "pedidos_20260810_1831.csv",
+  "Formato": "Csv",
+  "Registros": 1,
+  "Fecha": "15/09/2026"
 }
 ```
-
-## WhatsApp
-
-WhatsApp settings live under `WhatsAppOptions`.
-
-```json
-{
-  "WhatsAppOptions": {
-    "Enabled": false,
-    "BaseUrl": "",
-    "ApiKey": "",
-    "InstanceName": ""
-  }
-}
-```
-
-The current implementation targets the common Evolution API route:
-
-```text
-/message/sendText/{InstanceName}
-```
-
-Message statuses are defined in:
-
-```text
-Template-Api/WhatsApp/Models/Constants/WhatsAppMessageStatus.cs
-```
-
-## Mercado Pago
-
-Mercado Pago settings live under `MercadoPagoOptions`.
-
-```json
-{
-  "MercadoPagoOptions": {
-    "Enabled": false,
-    "BaseUrl": "https://api.mercadopago.com",
-    "AccessToken": "",
-    "PublicKey": "",
-    "WebhookSecret": "",
-    "CurrencyId": "ARS",
-    "SuccessUrl": "",
-    "PendingUrl": "",
-    "FailureUrl": "",
-    "NotificationUrl": "",
-    "AutoReturn": "approved",
-    "StatementDescriptor": "",
-    "WebhookToleranceSeconds": 300
-  }
-}
-```
-
-The backend exposes:
-
-```http
-POST /api/Product/GetAll
-GET /api/Product/GetOne
-POST /api/Product/Create
-POST /api/Product/Update
-POST /api/Product/Delete
-POST /api/Cart/Create
-POST /api/Cart/Update
-GET /api/Cart/GetOne
-POST /api/MercadoPago/CreatePreference
-POST /api/MercadoPago/CreateCartPreference
-GET /api/MercadoPago/GetPayment
-POST /api/MercadoPago/Webhook
-```
-
-`CreatePreference` is protected by JWT auth. It creates a Checkout Pro preference, stores the local `MercadoPagoPayment` log, and returns `InitPoint` and `SandboxInitPoint`.
-
-`Cart/Create` receives product ids and quantities, loads current product data from SQL, validates active products and stock, and stores each line with `CartProduct.SettedPrice`. This means later product price changes do not change an already-created cart total.
-
-`CreateCartPreference` is the safer checkout flow. It receives only `CartId` and optional payer data; the service loads the cart from SQL, validates ownership, validates stock, uses the cart's stored line prices, creates the Mercado Pago preference, and stores the payment with `CartId`.
-
-`Webhook` is public because Mercado Pago calls it without the API JWT. The service validates the `x-signature` and `x-request-id` headers, fetches the payment from Mercado Pago, validates amount/currency against the local log, and updates the local payment status idempotently.
-
-When Mercado Pago confirms an `approved` payment for a cart preference, the webhook decrements stock for each cart line and marks the cart as paid. Duplicate approved webhooks do not decrement stock again because `PaidAt` is used as the idempotency marker.
-
-For real products, do not trust item prices sent by a frontend. Prefer the cart flow or replace it with product-specific order logic that loads all purchasable items from the database, checks the current user owns the order, calculates totals server-side, and then creates the Mercado Pago preference.
-
-## AWS S3 Files
-
-The AWS file service is registered as `AwsS3Service` and lives under:
-
-```text
-Template-Api/Core/Services/AwsS3Service.cs
-```
-
-It supports:
-
-- Uploading one file.
-- Uploading a list of files.
-- Checking if a file exists.
-- Reading a file's metadata (`GetFileInfoAsync` → `S3FileInfo`: content type, size, last modified, ETag).
-- Downloading a file's bytes (`DownloadFileAsync` → `S3File`: key, file name, content type, content, size).
-- Generating signed download URLs.
-- Deleting one file.
-- Deleting a list of files (batched, up to 1000 keys per request).
-
-Every method returns `BaseResponse` / `BaseResponse<T>`, so a storage failure is a real error instead of an empty string the caller cannot interpret.
-
-Two ways to hand a file back to the client, and they are not interchangeable:
-
-- **`GetSignedUrlByFileKeyAsync`** — the browser downloads straight from S3. Cheaper and the default choice: no bytes go through the API.
-- **`DownloadFileAsync`** — the bytes come back into the process. Use it when the file has to be re-served by the API without exposing the bucket, or when another service needs the content — `S3File.Content` plugs directly into `EmailAttachment(FileName, Content, ContentType)`. The download is capped by the same `FileHelper` size limit as uploads, checked against the response `Content-Length` **before** the body is buffered, so an oversized object is rejected instead of being read into memory.
-
-`FileExistsAsync` delegates to `GetFileInfoAsync`, so both cost a single `HEAD`. `GetFileInfoAsync` returns `Data = null` for a missing file and an error only when the storage call actually failed.
-
-Folder constants are defined in:
-
-```text
-Template-Api/Core/Models/Constants/FolderNames.cs
-```
-
-`folder` must be one of the `FolderNames` values and `key` must be a plain file name — both are validated, so a caller cannot escape the folder prefix or sign an arbitrary object of the bucket.
-
-Uploads run only when `Aws:Enabled` is `true`. With the flag off, `UploadFileAsync` and the delete methods succeed without touching S3 (returning an empty key), and `GetSignedUrlByFileKeyAsync` returns a "not configured" error. Validation through `FileHelper` runs either way, so a request that fails locally fails in production too.
-
-Stored objects:
-
-- The key is `<folder>/<yyyy-MM-dd>_<id>_<guid><extension>`. The extension comes from the validated content type, never from the client-supplied file name.
-- `ContentType` is set as the object's own header, and objects are written with `AES256` server-side encryption.
-- Signed URLs expire after `Aws:SignedUrlMinutes` (default 15, capped at 60) and force a download through `Content-Disposition`. Pass `downloadName` to `GetSignedUrlByFileKeyAsync` to give the user a readable file name instead of the storage key.
-
-Allowed types, the size cap and the content-type to extension map all live in `Core/Helpers/FileHelper.cs`. Add a new type there and both the validation and the generated extension follow.
 
 ## Development Notes
 
 - Controllers should remain thin and delegate to services.
 - No service interfaces are used.
 - Use SQL scripts for database migrations.
-- Use transactions only when multiple database operations must succeed or fail together.
+- Use transactions only when multiple database operations must succeed or fail together. Creating an order with its lines is a single `SaveChangesAsync`, which EF already makes atomic.
 - Keep reusable constants under `Models/Constants`.
 - Keep request and response DTOs under `Models/DTO`.
 - Keep `Models/` for database tables only. Anything not mapped to a table goes under `Models/Internal`.
+- User-facing messages are Spanish and live in `Core/Models/Constants/Messages.cs`.
 
 ## Build Verification
 
 The project should compile from the root with:
 
 ```powershell
-dotnet build Template-Api.sln
+dotnet build LaNata-Api.sln
 ```
 
 ## Deployment (GitHub Actions to Azure App Service)
 
-This template ships with no deploy workflow by default. To set up auto-deploy from a branch (e.g. `master` or `main`) to an Azure App Service, follow the steps below.
+This repository ships with no deploy workflow by default. To set up auto-deploy from a branch (e.g. `master` or `main`) to an Azure App Service, follow the steps below.
 
 The result: every push to the trigger branch builds the project and deploys it to Azure. SQL migrations run automatically at app startup via `MigrationRunner.Run()`, so no extra step is required for the database.
 
@@ -547,13 +534,13 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Restore dependencies
-        run: dotnet restore Template-Api.sln
+        run: dotnet restore LaNata-Api.sln
 
       - name: Build (Release)
-        run: dotnet build Template-Api.sln --configuration Release --no-restore
+        run: dotnet build LaNata-Api.sln --configuration Release --no-restore
 
       - name: Publish
-        run: dotnet publish Template-Api/Template-Api.csproj --configuration Release --no-build --output "${{ github.workspace }}/publish"
+        run: dotnet publish LaNata-Api/LaNata-Api.csproj --configuration Release --no-build --output "${{ github.workspace }}/publish"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -586,8 +573,6 @@ jobs:
           package: ./publish
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
 ```
-
-If the project is renamed when copied from this template, also update the `.sln` and `.csproj` paths in the workflow.
 
 ### 2. Enable Basic Auth on the App Service
 
@@ -627,5 +612,5 @@ Commit and push the workflow file to the trigger branch. The first run starts au
 
 ### Notes
 
-- Migrations run at app startup, so any new SQL files under `Template-Api/Core/DAL/Migrations` will be applied when the new build is restarted by Azure after deployment.
+- Migrations run at app startup, so any new SQL files under `LaNata-Api/Core/DAL/Migrations` will be applied when the new build is restarted by Azure after deployment.
 - For staging environments, duplicate the workflow with a different trigger branch, a deployment slot name other than `Production`, and a separate publish profile secret.
