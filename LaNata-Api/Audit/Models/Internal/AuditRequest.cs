@@ -11,6 +11,10 @@ namespace LaNata_Api.Audit.Models.Internal
         public string Name { get; set; }
         public string Description { get; set; }
         public DateTime? Date { get; set; }
+        public int? UserId { get; set; }
+        public string UserName { get; set; }
+        public string UserEmail { get; set; }
+        public string IpAddress { get; set; }
         public AuditChangeSet Changes { get; set; }
 
         // Explicit snapshots override the ones coming from Changes

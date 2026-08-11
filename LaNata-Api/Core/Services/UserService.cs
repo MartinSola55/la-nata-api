@@ -1,8 +1,13 @@
 using Microsoft.EntityFrameworkCore;
 using System;
+using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
 using System.Threading.Tasks;
+using LaNata_Api.Audit.Helpers.ChangeList;
+using LaNata_Api.Audit.Models.Constants;
+using LaNata_Api.Audit.Models.Internal;
+using LaNata_Api.Audit.Services;
 using LaNata_Api.Core.DAL.DB;
 using LaNata_Api.Core.Models;
 using LaNata_Api.Core.Models.Constants;
@@ -11,13 +16,14 @@ using LaNata_Api.Core.Models.DTO.User;
 
 namespace LaNata_Api.Core.Services
 {
-    public class UserService(APIContext context, TokenService tokenService, AuthService authService)
+    public class UserService(APIContext context, TokenService tokenService, AuthService authService, AuditService auditService)
     {
         private const int EmailMaxLength = 60;
 
         private readonly APIContext _db = context;
         private readonly TokenService _tokenService = tokenService;
         private readonly AuthService _authService = authService;
+        private readonly AuditService _auditService = auditService;
 
         #region Combos
         public async Task<BaseResponse<BaseComboResponse>> GetComboRoles()
@@ -157,6 +163,8 @@ namespace LaNata_Api.Core.Services
                 return rs.SetError(Messages.Error.Exception());
             }
 
+            await Audit(AuditActionCode.CREATED, user, await BuildAuditChanges(AuditChangeList.ForCreated(user), user.RoleId));
+
             rs.Message = Messages.CRUD.EntityCreated("Usuario");
             rs.Data = new CreateResponse
             {
@@ -188,6 +196,12 @@ namespace LaNata_Api.Core.Services
             if (role == null)
                 return rs.SetError(Messages.Error.EntityNotFound("Rol"));
 
+            var previous = new User
+            {
+                Email = user.Email,
+                RoleId = user.RoleId
+            };
+
             user.Email = rq.Email?.ToLower() ?? string.Empty;
             user.RoleId = role.Id;
             user.UpdatedAt = DateTime.UtcNow;
@@ -207,6 +221,11 @@ namespace LaNata_Api.Core.Services
             {
                 return rs.SetError(Messages.Error.Exception());
             }
+
+            await Audit(AuditActionCode.UPDATED, user, await BuildAuditChanges(AuditChangeList.For(previous, user), previous.RoleId, user.RoleId));
+
+            if (checkPassword)
+                await AuditPasswordChanged(user);
 
             rs.Message = Messages.CRUD.EntityUpdated("Usuario");
             rs.Data = new UpdateResponse
@@ -252,6 +271,8 @@ namespace LaNata_Api.Core.Services
                 return rs.SetError(Messages.Error.Exception());
             }
 
+            await Audit(AuditActionCode.DELETED, user, await BuildAuditChanges(AuditChangeList.ForDeleted(user), user.RoleId));
+
             rs.Message = Messages.CRUD.EntityDeleted("Usuario");
             return rs;
         }
@@ -292,8 +313,62 @@ namespace LaNata_Api.Core.Services
                 return rs.SetError(Messages.Error.Exception());
             }
 
+            await AuditPasswordChanged(user);
+
             rs.Message = Messages.CRUD.EntityUpdated("Contraseña");
             return rs;
+        }
+        #endregion
+
+        #region Audit
+        private async Task<AuditChangeSet> BuildAuditChanges(AuditChangeList<User> changeList, params int[] roleIds)
+        {
+            var roles = await _db
+                .Role
+                .AsNoTracking()
+                .Where(x => roleIds.Contains(x.Id))
+                .ToDictionaryAsync(x => x.Id, x => x.Name);
+
+            return changeList
+                .AddField(x => x.Email, "Email")
+                .AddLookup(x => x.RoleId, value => ResolveRole(value, roles), "Rol")
+                .Build();
+        }
+
+        private async Task Audit(string actionCode, User user, AuditChangeSet changes)
+        {
+            await _auditService.Audit(new AuditRequest
+            {
+                ActionCode = actionCode,
+                Entity = AuditEntityCode.USER,
+                EntityKey = user.Id.ToString(),
+                Name = user.Email,
+                Changes = changes
+            });
+        }
+
+        private async Task AuditPasswordChanged(User user)
+        {
+            await _auditService.Audit(new AuditRequest
+            {
+                ActionCode = AuditActionCode.PASSWORD_CHANGED,
+                Entity = AuditEntityCode.USER,
+                EntityKey = user.Id.ToString(),
+                Name = user.Email,
+                Description = "Se cambió la contraseña del usuario",
+                Payload = new Dictionary<string, object>
+                {
+                    ["Email"] = user.Email
+                }
+            });
+        }
+
+        private static string ResolveRole(object value, IReadOnlyDictionary<int, string> roles)
+        {
+            if (value == null || !int.TryParse(value.ToString(), out var roleId))
+                return null;
+
+            return roles.GetValueOrDefault(roleId) ?? value.ToString();
         }
         #endregion
 
