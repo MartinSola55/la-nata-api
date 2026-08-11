@@ -47,6 +47,17 @@ namespace LaNata_Api.Report.Helpers
 
         protected void ComposeIntro(ColumnDescriptor column)
         {
+            if (!string.IsNullOrWhiteSpace(_options.DocumentTitle))
+            {
+                column.Item()
+                    .PaddingBottom(ReportDimensions.SpacingMd)
+                    .AlignCenter()
+                    .Text(_options.DocumentTitle)
+                    .FontSize(ReportDimensions.FontLg)
+                    .Bold()
+                    .FontColor(ReportColors.ToColor(ReportColors.Primary));
+            }
+
             if (_options.Filters is { Count: > 0 })
             {
                 column.Item()

@@ -135,7 +135,6 @@ POST /api/Product/Update
 POST /api/Product/Delete
 POST /api/Product/GetStock              Availability for an event date
 POST /api/Product/Report                PDF price list
-POST /api/Product/ExportCsv
 POST /api/Product/ExportExcel
 
 POST /api/Order/GetAll                  By day, or by date range
@@ -148,7 +147,6 @@ POST /api/Order/AddProduct
 POST /api/Order/RemoveProduct
 POST /api/Order/Report                  PDF detail, with or without prices
 POST /api/Order/Budget                  PDF quote for an order not yet created
-POST /api/Order/ExportCsv
 POST /api/Order/ExportExcel
 
 POST /api/Expense/GetAll                By date range
@@ -158,7 +156,6 @@ POST /api/Expense/Update
 POST /api/Expense/Delete
 POST /api/Expense/GetBalance            Expenses, income and profit between two dates
 POST /api/Expense/Report                PDF balance
-POST /api/Expense/ExportCsv
 POST /api/Expense/ExportExcel
 
 POST /api/User/...                      User management (admin)

@@ -292,7 +292,16 @@ namespace LaNata_Api.Core.Services
             var options = new ReportOptions
             {
                 Title = CompanyInfo.Name,
-                Subtitle = "Detalle de gastos e ingresos",
+                Subtitle = CompanyInfo.Slogan + Environment.NewLine + CompanyInfo.Tagline,
+                DocumentTitle = "DETALLE DE GASTOS E INGRESOS",
+                Logo = ReportAssets.Read("logo.png"),
+                ContactLines =
+                [
+                    "Fecha: " + DateTime.Now.ToString("dd/MM/yyyy"),
+                    "CUIT: " + CompanyInfo.Cuit,
+                    CompanyInfo.Street + " - Tel: " + CompanyInfo.Phone,
+                    CompanyInfo.City
+                ],
                 Author = _tokenService.TryGetToken()?.Email,
                 FooterNote = CompanyInfo.FooterNote,
                 Filters =

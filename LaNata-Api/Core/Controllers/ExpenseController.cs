@@ -53,12 +53,6 @@ namespace LaNata_Api.Core.Controllers
 
         #region Documents
         [HttpPost]
-        public async Task<IActionResult> ExportCsv([FromBody] GetAllRequest rq)
-        {
-            return DownloadOrError(await _expenseService.Export(ExportFileFormat.Csv, rq));
-        }
-
-        [HttpPost]
         public async Task<IActionResult> ExportExcel([FromBody] GetAllRequest rq)
         {
             return DownloadOrError(await _expenseService.Export(ExportFileFormat.Excel, rq));

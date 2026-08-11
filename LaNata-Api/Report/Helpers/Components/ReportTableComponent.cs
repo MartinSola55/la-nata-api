@@ -46,7 +46,7 @@ namespace LaNata_Api.Report.Helpers.Components
                     foreach (var column in _columns)
                     {
                         header.Cell()
-                            .Background(ReportColors.ToColor(ReportColors.Primary))
+                            .Background(ReportColors.ToColor(ReportColors.Accent))
                             .Padding(ReportDimensions.CellPaddingY)
                             .AlignmentFor(column.Alignment)
                             .Text(column.Header ?? string.Empty)

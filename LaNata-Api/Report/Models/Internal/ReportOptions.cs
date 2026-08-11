@@ -21,12 +21,16 @@ namespace LaNata_Api.Report.Models.Internal
     {
         public string Title { get; set; }
         public string Subtitle { get; set; }
+        public string DocumentTitle { get; set; }
 
         public string Author { get; set; }
 
         public string FooterNote { get; set; }
 
         public byte[] Logo { get; set; }
+        public List<string> ContactLines { get; set; } = [];
+        public byte[] WhatsAppQr { get; set; }
+        public byte[] InstagramQr { get; set; }
 
         public ReportOrientation Orientation { get; set; } = ReportOrientation.Portrait;
         public ReportPageSize PageSize { get; set; } = ReportPageSize.A4;

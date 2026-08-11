@@ -63,12 +63,6 @@ namespace LaNata_Api.Core.Controllers
         // File endpoints are the one exception to returning BaseResponse: on success they return
         // the binary, and only fall back to the BaseResponse error shape when generation fails
         [HttpPost]
-        public async Task<IActionResult> ExportCsv([FromBody] GetAllRequest rq)
-        {
-            return DownloadOrError(await _productService.Export(ExportFileFormat.Csv, rq));
-        }
-
-        [HttpPost]
         public async Task<IActionResult> ExportExcel([FromBody] GetAllRequest rq)
         {
             return DownloadOrError(await _productService.Export(ExportFileFormat.Excel, rq));

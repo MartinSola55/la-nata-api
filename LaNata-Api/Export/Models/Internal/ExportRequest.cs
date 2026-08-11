@@ -11,9 +11,6 @@ namespace LaNata_Api.Export.Models.Internal
         public IEnumerable<T> Rows { get; set; }
 
         public bool FreezeHeader { get; set; } = true;
-
-        // Defaults to ";", which is what Excel expects in Spanish locales
-        public string Delimiter { get; set; }
     }
 
     public class ExportSheet

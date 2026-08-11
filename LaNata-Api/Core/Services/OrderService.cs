@@ -244,8 +244,7 @@ namespace LaNata_Api.Core.Services
 
             var rangeEnd = dateTo.AddDays(1);
 
-            // Grouped on the date part: stored rows carry a time, and the calendar wants one entry
-            // per day regardless of it
+            // Grouped on the date part: stored rows carry a time, and the calendar wants one entry per day regardless of it
             rs.Data = new GetDatesResponse
             {
                 Items = await _db
@@ -297,8 +296,7 @@ namespace LaNata_Api.Core.Services
             if (rq.Quantity > available)
                 return rs.SetError(Messages.Error.ProductWithoutStock());
 
-            // The price identifies the line, which is what lets one order hold the same product at an
-            // old and a current price at the same time
+            // The price identifies the line, which is what lets one order hold the same product at an old and a current price at the same time
             var unitPrice = rq.UnitPrice ?? product.Price;
             var line = order.Products.FirstOrDefault(x => x.ProductId == product.Id && x.UnitPrice == unitPrice);
             var isNewLine = line == null;
@@ -362,8 +360,7 @@ namespace LaNata_Api.Core.Services
             if (order == null)
                 return rs.SetError(Messages.Error.EntityNotFound("Pedido"));
 
-            // No Include on Product on purpose: a line whose product was removed from the catalogue
-            // must still be removable from the order
+            // No Include on Product on purpose: a line whose product was removed from the catalogue must still be removable from the order
             var line = await _db
                 .ProductOrder
                 .FirstOrDefaultAsync(x => x.OrderId == rq.OrderId && x.ProductId == rq.ProductId && x.UnitPrice == rq.UnitPrice);
@@ -474,14 +471,18 @@ namespace LaNata_Api.Core.Services
                 .ToList();
 
             var rows = AppendShipmentRow(productRows, order.ShipmentPrice);
-
-            rs = GenerateDetailReport(rows, rq.WithPrice, "pedido_" + order.Id, new List<ReportField>
+            var fields = new List<ReportField>
             {
                 new("Cliente", order.ClientName),
                 new("Fecha", order.Date.ToString("dd/MM/yyyy")),
                 new("Lugar", order.EventAddress),
                 new("Teléfono", order.Phone ?? "-")
-            });
+            };
+
+            if (!rq.WithPrice)
+                fields.Insert(0, new ReportField("Pedido Nº", order.Id.ToString()));
+
+            rs = GenerateDetailReport(rows, rq.WithPrice, "pedido_" + order.Id, fields);
 
             if (rs.Success)
             {
@@ -800,9 +801,19 @@ namespace LaNata_Api.Core.Services
                 Options = new ReportOptions
                 {
                     Title = CompanyInfo.Name,
-                    Subtitle = CompanyInfo.Slogan,
+                    Subtitle = CompanyInfo.Slogan + Environment.NewLine + CompanyInfo.Tagline,
+                    DocumentTitle = "DETALLE",
+                    Logo = ReportAssets.Read("logo.png"),
+                    ContactLines =
+                    [
+                        "CUIT: " + CompanyInfo.Cuit,
+                        CompanyInfo.Street + " - Tel: " + CompanyInfo.Phone,
+                        CompanyInfo.City
+                    ],
                     Author = _tokenService.TryGetToken()?.Email,
                     FooterNote = CompanyInfo.Address + " - Tel: " + CompanyInfo.Phone,
+                    WhatsAppQr = withPrice ? ReportAssets.Read("qr_wpp.png") : null,
+                    InstagramQr = withPrice ? ReportAssets.Read("qr_ig.png") : null,
                     Filters = fields,
                     Summary = summary,
                     ShowRowCount = false

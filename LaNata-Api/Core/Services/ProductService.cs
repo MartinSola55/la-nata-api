@@ -338,7 +338,16 @@ namespace LaNata_Api.Core.Services
                 Options = new ReportOptions
                 {
                     Title = CompanyInfo.Name,
-                    Subtitle = "Listado de productos",
+                    Subtitle = CompanyInfo.Slogan + Environment.NewLine + CompanyInfo.Tagline,
+                    DocumentTitle = "LISTADO DE PRODUCTOS",
+                    Logo = ReportAssets.Read("logo.png"),
+                    ContactLines =
+                    [
+                        "Fecha: " + DateTime.Now.ToString("dd/MM/yyyy"),
+                        "CUIT: " + CompanyInfo.Cuit,
+                        CompanyInfo.Street + " - Tel: " + CompanyInfo.Phone,
+                        CompanyInfo.City
+                    ],
                     Author = _tokenService.TryGetToken()?.Email,
                     FooterNote = CompanyInfo.FooterNote,
                     Filters = BuildReportFilters(rq)

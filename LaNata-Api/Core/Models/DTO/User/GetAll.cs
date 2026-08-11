@@ -17,6 +17,7 @@ namespace LaNata_Api.Core.Models.DTO.User
         public class Item
         {
             public int Id { get; set; }
+            public int RoleId { get; set; }
             public string Role { get; set; }
             public string Email { get; set; }
             public DateTime CreatedAt { get; set; }

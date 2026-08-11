@@ -22,6 +22,6 @@ namespace LaNata_Api.Report.Models.Constants
         public const float FontLg = 12f;
         public const float FontXl = 16f;
 
-        public const float LogoMaxHeight = 34f;
+        public const float LogoMaxHeight = 58f;
     }
 }

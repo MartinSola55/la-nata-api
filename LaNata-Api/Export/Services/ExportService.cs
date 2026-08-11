@@ -13,28 +13,6 @@ namespace LaNata_Api.Export.Services
     public class ExportService
     {
         #region Methods
-        public BaseResponse<ExportFile> ToCsv<T>(ExportRequest<T> rq)
-        {
-            var rs = new BaseResponse<ExportFile>();
-
-            var rows = Materialize(rq, rs, out var validation);
-            if (!validation)
-                return rs;
-
-            try
-            {
-                var content = CsvWriter.Write(rq.Columns, rows, rq.Delimiter, ResolveCulture(rq));
-
-                rs.Data = BuildFile(rq.FileName, ExportFileExtension.CSV, ExportContentType.CSV, content, rows.Count);
-            }
-            catch (Exception)
-            {
-                return rs.SetError(ExportMessages.ExportException());
-            }
-
-            return rs;
-        }
-
         public async Task<BaseResponse<ExportFile>> ToExcel<T>(ExportRequest<T> rq)
         {
             var rs = new BaseResponse<ExportFile>();
@@ -60,12 +38,9 @@ namespace LaNata_Api.Export.Services
 
         public async Task<BaseResponse<ExportFile>> Export<T>(ExportFileFormat format, ExportRequest<T> rq)
         {
-            return format == ExportFileFormat.Excel
-                ? await ToExcel(rq)
-                : ToCsv(rq);
+            return await ToExcel(rq);
         }
 
-        // Multi-sheet: CSV has no equivalent, so this is Excel only
         public async Task<BaseResponse<ExportFile>> ToExcelWorkbook(ExportWorkbookRequest rq)
         {
             var rs = new BaseResponse<ExportFile>();
@@ -93,7 +68,7 @@ namespace LaNata_Api.Export.Services
         #endregion
 
         #region Private
-        // Pulls the sequence into a list once, so a lazy query is not re-executed per column
+        // Pulls the sequence into a list once, so a lazy query is not re-executed per column.
         private static List<T> Materialize<T>(ExportRequest<T> rq, BaseResponse<ExportFile> rs, out bool isValid)
         {
             isValid = false;
@@ -127,7 +102,7 @@ namespace LaNata_Api.Export.Services
             };
         }
 
-        // Timestamped so repeated downloads do not collide in the browser
+        // Timestamped so repeated downloads do not collide in the browser.
         private static string BuildFileName(string fileName, string extension)
         {
             var name = string.IsNullOrWhiteSpace(fileName) ? "export" : fileName.Trim();

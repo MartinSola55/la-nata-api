@@ -86,6 +86,7 @@ namespace LaNata_Api.Core.Services
                         {
                             Id = x.Id,
                             Email = x.Email,
+                            RoleId = x.RoleId,
                             CreatedAt = x.CreatedAt,
                             Role = x.Role.Name
                         })
