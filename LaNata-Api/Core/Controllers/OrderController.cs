@@ -50,17 +50,6 @@ namespace LaNata_Api.Core.Controllers
             return await _orderService.GetDates(rq);
         }
 
-        [HttpPost]
-        public async Task<BaseResponse> AddProduct([FromBody] AddProductRequest rq)
-        {
-            return await _orderService.AddProduct(rq);
-        }
-
-        [HttpPost]
-        public async Task<BaseResponse> RemoveProduct([FromBody] RemoveProductRequest rq)
-        {
-            return await _orderService.RemoveProduct(rq);
-        }
         #endregion
 
         #region Documents

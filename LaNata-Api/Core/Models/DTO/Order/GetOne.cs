@@ -24,8 +24,7 @@ namespace LaNata_Api.Core.Models.DTO.Order
         public List<OrderProductResponse> Products { get; set; } = [];
     }
 
-    // There is no surrogate id: a line is identified by product + unit price, which is also what
-    // AddProduct and RemoveProduct take
+    // There is no surrogate id: a line is identified by product + unit price.
     public class OrderProductResponse
     {
         public int ProductId { get; set; }

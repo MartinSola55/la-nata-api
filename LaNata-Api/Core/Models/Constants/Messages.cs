@@ -69,21 +69,6 @@ namespace LaNata_Api.Core.Models.Constants
                 return "El producto no cuenta con suficiente stock.";
             }
 
-            public static string ProductAlreadyInOrder()
-            {
-                return "Ya existe un producto con el mismo precio en el pedido.";
-            }
-
-            public static string ProductNotInOrder()
-            {
-                return "El producto no se encuentra en el pedido.";
-            }
-
-            public static string QuantityGreaterThanReserved()
-            {
-                return "Debes quitar una cantidad menor o igual a la reservada.";
-            }
-
             public static string OrderWithoutProducts()
             {
                 return "No hay ningún producto cargado en el pedido.";
@@ -143,27 +128,5 @@ namespace LaNata_Api.Core.Models.Constants
             }
         }
 
-        public class Order
-        {
-            public static string ProductAdded()
-            {
-                return "El producto se agregó correctamente al pedido.";
-            }
-
-            public static string ProductQuantityAdded()
-            {
-                return "El producto se sumó correctamente al pedido.";
-            }
-
-            public static string ProductRemoved()
-            {
-                return "El producto se eliminó correctamente del pedido.";
-            }
-
-            public static string ProductQuantitySubtracted()
-            {
-                return "El producto se restó correctamente del pedido.";
-            }
-        }
     }
 }

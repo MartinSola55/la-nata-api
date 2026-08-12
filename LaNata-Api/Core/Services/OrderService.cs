@@ -155,7 +155,11 @@ namespace LaNata_Api.Core.Services
             if (rq == null || rq.Id <= 0)
                 return rs.SetError(Messages.Error.FieldGraterThanZero("id"));
 
-            var order = await _db.Order.FirstOrDefaultAsync(x => x.Id == rq.Id);
+            var order = await _db
+                .Order
+                .Include(x => x.Products)
+                .FirstOrDefaultAsync(x => x.Id == rq.Id);
+
             if (order == null)
                 return rs.SetError(Messages.Error.EntityNotFound("Pedido"));
 
@@ -171,10 +175,30 @@ namespace LaNata_Api.Core.Services
             if (!rs.Attach(ValidateOrder(order)).Success)
                 return rs;
 
-            // Moving the order to another day re-checks availability there: the products it reserves
-            // must still fit next to whatever the new date already has booked
-            if (previous.Date.Date != order.Date.Date && !rs.Attach(await ValidateDateChange(order)).Success)
-                return rs;
+            var linesResponse = await BuildOrderProducts(rq.Products, order.Date, order.Id, useRequestedUnitPrices: true);
+            if (!linesResponse.Success)
+                return rs.SetError(linesResponse.Error.Message);
+
+            var auditProducts = await LoadLineProducts(previous.Products.Concat(linesResponse.Data));
+            var auditChanges = BuildUpdateAuditChanges(previous, order, linesResponse.Data, auditProducts);
+            var requestedLines = linesResponse.Data.ToDictionary(x => (x.ProductId, x.UnitPrice));
+
+            foreach (var existingLine in order.Products.ToList())
+            {
+                if (requestedLines.Remove((existingLine.ProductId, existingLine.UnitPrice), out var requestedLine))
+                {
+                    existingLine.Quantity = requestedLine.Quantity;
+                    continue;
+                }
+
+                _db.ProductOrder.Remove(existingLine);
+            }
+
+            foreach (var requestedLine in requestedLines.Values)
+            {
+                requestedLine.OrderId = order.Id;
+                order.Products.Add(requestedLine);
+            }
 
             try
             {
@@ -185,7 +209,7 @@ namespace LaNata_Api.Core.Services
                 return rs.SetError(Messages.Error.Exception());
             }
 
-            await Audit(AuditActionCode.UPDATED, order, BuildAuditChanges(AuditChangeList.For(previous, order)));
+            await Audit(AuditActionCode.UPDATED, order, auditChanges);
 
             rs.Message = Messages.CRUD.EntityUpdated("Pedido");
             return rs;
@@ -256,141 +280,6 @@ namespace LaNata_Api.Core.Services
             return rs;
         }
 
-        public async Task<BaseResponse> AddProduct(AddProductRequest rq)
-        {
-            var rs = new BaseResponse();
-
-            if (rq == null)
-                return rs.SetError(Messages.Error.EntityNotFound("Pedido"));
-
-            if (rq.Quantity <= 0)
-                return rs.SetError(Messages.Error.FieldGraterThanZero("cantidad"));
-
-            if (rq.Quantity > ValidationLimits.OrderQuantityMax)
-                return rs.SetError(Messages.Error.InvalidField("cantidad"));
-
-            if (rq.UnitPrice.HasValue && (rq.UnitPrice.Value <= 0 || rq.UnitPrice.Value > ValidationLimits.ProductPriceMax))
-                return rs.SetError(Messages.Error.InvalidField("precio unitario"));
-
-            var order = await _db
-                .Order
-                .Include(x => x.Products)
-                .FirstOrDefaultAsync(x => x.Id == rq.OrderId);
-
-            if (order == null)
-                return rs.SetError(Messages.Error.EntityNotFound("Pedido"));
-
-            var product = await _db.Product.FirstOrDefaultAsync(x => x.Id == rq.ProductId);
-            if (product == null)
-                return rs.SetError(Messages.Error.EntityNotFound("Producto"));
-
-            var available = await GetAvailableStock(product, order.Date, order.Id);
-            if (rq.Quantity > available)
-                return rs.SetError(Messages.Error.ProductWithoutStock());
-
-            // The price identifies the line, which is what lets one order hold the same product at an old and a current price at the same time
-            var unitPrice = rq.UnitPrice ?? product.Price;
-            var line = order.Products.FirstOrDefault(x => x.ProductId == product.Id && x.UnitPrice == unitPrice);
-            var isNewLine = line == null;
-
-            if (isNewLine)
-            {
-                line = new ProductOrder
-                {
-                    OrderId = order.Id,
-                    ProductId = product.Id,
-                    Quantity = rq.Quantity,
-                    UnitPrice = unitPrice
-                };
-
-                _db.ProductOrder.Add(line);
-            }
-            else
-            {
-                if (line.Quantity + rq.Quantity > ValidationLimits.OrderQuantityMax)
-                    return rs.SetError(Messages.Error.InvalidField("cantidad"));
-
-                line.Quantity += rq.Quantity;
-            }
-
-            // Touching a line is an edit of the order it belongs to
-            order.UpdatedAt = DateTime.UtcNow;
-
-            try
-            {
-                await _db.SaveChangesAsync();
-            }
-            catch (DbUpdateException)
-            {
-                return rs.SetError(Messages.Error.ProductAlreadyInOrder());
-            }
-            catch (Exception)
-            {
-                return rs.SetError(Messages.Error.Exception());
-            }
-
-            await AuditProductLine(AuditActionCode.PRODUCT_ADDED, order, product, rq.Quantity, unitPrice);
-
-            rs.Message = isNewLine ? Messages.Order.ProductAdded() : Messages.Order.ProductQuantityAdded();
-            return rs;
-        }
-
-        public async Task<BaseResponse> RemoveProduct(RemoveProductRequest rq)
-        {
-            var rs = new BaseResponse();
-
-            if (rq == null)
-                return rs.SetError(Messages.Error.EntityNotFound("Pedido"));
-
-            if (rq.Quantity <= 0)
-                return rs.SetError(Messages.Error.FieldGraterThanZero("cantidad"));
-
-            if (rq.Quantity > ValidationLimits.OrderQuantityMax)
-                return rs.SetError(Messages.Error.InvalidField("cantidad"));
-
-            if (rq.UnitPrice <= 0 || rq.UnitPrice > ValidationLimits.ProductPriceMax)
-                return rs.SetError(Messages.Error.InvalidField("precio unitario"));
-
-            var order = await _db.Order.FirstOrDefaultAsync(x => x.Id == rq.OrderId);
-            if (order == null)
-                return rs.SetError(Messages.Error.EntityNotFound("Pedido"));
-
-            // No Include on Product on purpose: a line whose product was removed from the catalogue must still be removable from the order
-            var line = await _db
-                .ProductOrder
-                .FirstOrDefaultAsync(x => x.OrderId == rq.OrderId && x.ProductId == rq.ProductId && x.UnitPrice == rq.UnitPrice);
-
-            if (line == null)
-                return rs.SetError(Messages.Error.ProductNotInOrder());
-
-            if (rq.Quantity > line.Quantity)
-                return rs.SetError(Messages.Error.QuantityGreaterThanReserved());
-
-            var isFullRemoval = rq.Quantity == line.Quantity;
-            var product = (await LoadLineProducts([line])).GetValueOrDefault(line.ProductId);
-
-            // Hard delete
-            if (isFullRemoval)
-                _db.ProductOrder.Remove(line);
-            else
-                line.Quantity -= rq.Quantity;
-
-            order.UpdatedAt = DateTime.UtcNow;
-
-            try
-            {
-                await _db.SaveChangesAsync();
-            }
-            catch (Exception)
-            {
-                return rs.SetError(Messages.Error.Exception());
-            }
-
-            await AuditProductLine(AuditActionCode.PRODUCT_REMOVED, order, product, rq.Quantity, rq.UnitPrice);
-
-            rs.Message = isFullRemoval ? Messages.Order.ProductRemoved() : Messages.Order.ProductQuantitySubtracted();
-            return rs;
-        }
         #endregion
 
         #region Documents
@@ -561,6 +450,84 @@ namespace LaNata_Api.Core.Services
                 .Build();
         }
 
+        private static AuditChangeSet BuildUpdateAuditChanges(
+            Order previous,
+            Order updated,
+            IEnumerable<ProductOrder> updatedProducts,
+            IReadOnlyDictionary<int, Product> products)
+        {
+            var changes = BuildAuditChanges(AuditChangeList.For(previous, updated));
+            var previousLines = previous.Products ?? [];
+            var currentLines = updatedProducts?.ToList() ?? [];
+
+            changes.State["Products"] = BuildProductAuditSnapshot(previousLines, products);
+            changes.Payload["Products"] = BuildProductAuditSnapshot(currentLines, products);
+
+            if (!HaveSameProductLines(previousLines, currentLines))
+            {
+                changes.Changes.Add(new AuditChange
+                {
+                    Field = nameof(Order.Products),
+                    FieldName = "Productos",
+                    PreviousValue = BuildProductLineSummary(previousLines),
+                    UpdatedValue = BuildProductLineSummary(currentLines),
+                    Description = "Se actualizaron los productos del pedido"
+                });
+            }
+
+            return changes;
+        }
+
+        private static List<Dictionary<string, object>> BuildProductAuditSnapshot(
+            IEnumerable<ProductOrder> lines,
+            IReadOnlyDictionary<int, Product> products)
+        {
+            return lines
+                .Select(x =>
+                {
+                    products.TryGetValue(x.ProductId, out var product);
+
+                    return new
+                    {
+                        Line = x,
+                        ProductName = product?.Description ?? $"Producto #{x.ProductId}"
+                    };
+                })
+                .OrderBy(x => x.ProductName)
+                .ThenBy(x => x.Line.ProductId)
+                .ThenBy(x => x.Line.UnitPrice)
+                .Select(x => new Dictionary<string, object>
+                {
+                    ["Product"] = $"#{x.Line.ProductId} - {x.ProductName}",
+                    ["Quantity"] = x.Line.Quantity,
+                    ["UnitPrice"] = Currency(x.Line.UnitPrice),
+                    ["Subtotal"] = Currency(x.Line.Quantity * x.Line.UnitPrice)
+                })
+                .ToList();
+        }
+
+        private static bool HaveSameProductLines(IEnumerable<ProductOrder> previous, IEnumerable<ProductOrder> updated)
+        {
+            var previousValues = previous
+                .OrderBy(x => x.ProductId)
+                .ThenBy(x => x.UnitPrice)
+                .Select(x => (x.ProductId, x.Quantity, x.UnitPrice));
+            var updatedValues = updated
+                .OrderBy(x => x.ProductId)
+                .ThenBy(x => x.UnitPrice)
+                .Select(x => (x.ProductId, x.Quantity, x.UnitPrice));
+
+            return previousValues.SequenceEqual(updatedValues);
+        }
+
+        private static string BuildProductLineSummary(IEnumerable<ProductOrder> lines)
+        {
+            var values = lines.ToList();
+            var quantity = values.Sum(x => (long)x.Quantity);
+
+            return $"{values.Count} renglón(es), {quantity} unidad(es)";
+        }
+
         private async Task Audit(string actionCode, Order order, AuditChangeSet changes)
         {
             await _auditService.Audit(new AuditRequest
@@ -570,23 +537,6 @@ namespace LaNata_Api.Core.Services
                 EntityKey = order.Id.ToString(),
                 Name = order.ClientName,
                 Changes = changes
-            });
-        }
-
-        private async Task AuditProductLine(string actionCode, Order order, Product product, int quantity, decimal unitPrice)
-        {
-            await _auditService.Audit(new AuditRequest
-            {
-                ActionCode = actionCode,
-                Entity = AuditEntityCode.ORDER,
-                EntityKey = order.Id.ToString(),
-                Name = order.ClientName,
-                Payload = new Dictionary<string, object>
-                {
-                    ["Producto"] = product?.Description,
-                    ["Cantidad"] = quantity,
-                    ["Precio unitario"] = unitPrice
-                }
             });
         }
 
@@ -653,33 +603,11 @@ namespace LaNata_Api.Core.Services
             return validation.Error == null ? rs : rs.SetError(validation.Error.Message);
         }
 
-        private async Task<BaseResponse> ValidateDateChange(Order order)
-        {
-            var rs = new BaseResponse();
-
-            var lines = await _db
-                .ProductOrder
-                .Where(x => x.OrderId == order.Id)
-                .ToListAsync();
-
-            var products = await LoadLineProducts(lines);
-
-            foreach (var group in lines.GroupBy(x => x.ProductId))
-            {
-                var product = products.GetValueOrDefault(group.Key);
-                if (product == null)
-                    continue;
-
-                var available = await GetAvailableStock(product, order.Date, order.Id);
-
-                if (group.Sum(x => x.Quantity) > available)
-                    return rs.SetError(Messages.Error.ProductWithoutStock());
-            }
-
-            return rs;
-        }
-
-        private async Task<BaseResponse<List<ProductOrder>>> BuildOrderProducts(List<OrderProductRequest> requestProducts, DateTime date)
+        private async Task<BaseResponse<List<ProductOrder>>> BuildOrderProducts(
+            List<OrderProductRequest> requestProducts,
+            DateTime date,
+            int? excludeOrderId = null,
+            bool useRequestedUnitPrices = false)
         {
             var rs = new BaseResponse<List<ProductOrder>>();
 
@@ -692,40 +620,53 @@ namespace LaNata_Api.Core.Services
             if (requestProducts.Any(x => x.Quantity <= 0 || x.Quantity > ValidationLimits.OrderQuantityMax))
                 return rs.SetError(Messages.Error.FieldGraterThanZero("cantidad"));
 
-            // The same product can arrive more than once in the basket, so it is summed before the
-            // stock check instead of being validated line by line
-            var requested = requestProducts
-                .GroupBy(x => x.ProductId)
-                .Select(x => new
+            if (useRequestedUnitPrices && requestProducts.Any(x => x.UnitPrice.HasValue
+                && (x.UnitPrice.Value <= 0 || x.UnitPrice.Value > ValidationLimits.ProductPriceMax)))
+                return rs.SetError(Messages.Error.InvalidField("precio unitario"));
+
+            var productIds = requestProducts.Select(x => x.ProductId).Distinct().ToList();
+            var products = await _db.Product.Where(x => productIds.Contains(x.Id)).ToListAsync();
+
+            if (products.Count != productIds.Count)
+                return rs.SetError(Messages.Error.EntityNotFound("Producto"));
+
+            var resolvedLines = requestProducts
+                .Select(x =>
                 {
-                    ProductId = x.Key,
-                    Quantity = x.Sum(p => p.Quantity)
+                    var product = products.First(p => p.Id == x.ProductId);
+                    return new
+                    {
+                        Product = product,
+                        x.Quantity,
+                        UnitPrice = useRequestedUnitPrices && x.UnitPrice.HasValue
+                            ? x.UnitPrice.Value
+                            : product.Price
+                    };
                 })
                 .ToList();
 
-            var productIds = requested.Select(x => x.ProductId).ToList();
-            var products = await _db.Product.Where(x => productIds.Contains(x.Id)).ToListAsync();
-
-            var lines = new List<ProductOrder>();
-
-            foreach (var item in requested)
+            // Availability belongs to the product, not to a product-price line. All prices for the
+            // same product are summed before comparing against stock.
+            foreach (var productGroup in resolvedLines.GroupBy(x => x.Product.Id))
             {
-                var product = products.FirstOrDefault(x => x.Id == item.ProductId);
-                if (product == null)
-                    return rs.SetError(Messages.Error.EntityNotFound("Producto"));
+                var product = productGroup.First().Product;
+                var requestedQuantity = productGroup.Sum(x => (long)x.Quantity);
 
-                var available = await GetAvailableStock(product, date, null);
-                if (item.Quantity > available)
+                var available = await GetAvailableStock(product, date, excludeOrderId);
+                if (requestedQuantity > available)
                     return rs.SetError(Messages.Error.ProductWithoutStock());
-
-                lines.Add(new ProductOrder
-                {
-                    ProductId = product.Id,
-                    Product = product,
-                    Quantity = item.Quantity,
-                    UnitPrice = product.Price
-                });
             }
+
+            var lines = resolvedLines
+                .GroupBy(x => new { x.Product.Id, x.UnitPrice })
+                .Select(x => new ProductOrder
+                {
+                    ProductId = x.Key.Id,
+                    Product = x.First().Product,
+                    Quantity = x.Sum(line => line.Quantity),
+                    UnitPrice = x.Key.UnitPrice
+                })
+                .ToList();
 
             rs.Data = lines;
             return rs;
