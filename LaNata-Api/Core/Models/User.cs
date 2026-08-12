@@ -8,16 +8,9 @@ namespace LaNata_Api.Core.Models
     public class User : AuditableEntity
     {
         [Key]
-        [Column("id")]
         public int Id { get; set; }
-
-        [Column("id_rol")]
         public int RoleId { get; set; }
-
-        [Column("email")]
         public string Email { get; set; }
-
-        [Column("password")]
         public string PasswordHash { get; set; }
 
         [ForeignKey("RoleId")]

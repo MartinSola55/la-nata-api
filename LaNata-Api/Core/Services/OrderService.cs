@@ -19,7 +19,6 @@ using LaNata_Api.Export.Models.Constants;
 using LaNata_Api.Export.Models.Internal;
 using LaNata_Api.Export.Services;
 using LaNata_Api.Report.Helpers;
-using LaNata_Api.Report.Models.Constants;
 using LaNata_Api.Report.Models.Internal;
 using LaNata_Api.Report.Services;
 
@@ -27,12 +26,6 @@ namespace LaNata_Api.Core.Services
 {
     public class OrderService(APIContext context, AuditService auditService, ExportService exportService, ReportService reportService, TokenService tokenService)
     {
-        private const int ClientNameMaxLength = 500;
-        private const int AddressMaxLength = 500;
-        private const int ObservationMaxLength = 500;
-        private const int PhoneMaxLength = 20;
-        private const double ShipmentPriceMax = 1000000;
-        private const int QuantityMax = 100000;
         private const string ShipmentRowDescription = "Flete";
 
         // Every one of the 2200 rows already in production stores the event day at 12:00, because the
@@ -50,6 +43,11 @@ namespace LaNata_Api.Core.Services
         public async Task<BaseResponse<GetAllResponse>> GetAll(GetAllRequest rq)
         {
             rq ??= new GetAllRequest();
+
+            var validationError = ServiceRequestValidator.ValidateSort(rq)
+                ?? ServiceRequestValidator.ValidateSearch(rq.Search);
+            if (validationError != null)
+                return new BaseResponse<GetAllResponse>().SetError(validationError);
 
             var query = _db.Order.Include(x => x.Products).AsQueryable();
 
@@ -83,8 +81,8 @@ namespace LaNata_Api.Core.Services
         {
             var rs = new BaseResponse<GetOneResponse>();
 
-            if (rq == null || rq.Id <= 0)
-                return rs.SetError(Messages.Error.FieldGraterThanZero("id"));
+            if (rq == null)
+                return rs.SetError(Messages.Error.EntityNotFound("Pedido"));
 
             var order = await _db
                 .Order
@@ -108,12 +106,12 @@ namespace LaNata_Api.Core.Services
 
             var order = new Order
             {
-                ClientName = TextHelper.ToTitleCase(rq.ClientName),
-                Phone = TextHelper.ToNumber(rq.Phone),
-                EventAddress = TextHelper.ToUpperFirst(rq.EventAddress),
+                ClientName = rq.ClientName?.Trim(),
+                Phone = rq.Phone?.Trim(),
+                EventAddress = rq.EventAddress?.Trim(),
                 Date = NormalizeEventDate(rq.Date),
                 ShipmentPrice = rq.ShipmentPrice,
-                Observation = TextHelper.ToUpperFirst(rq.Observation)
+                Observation = rq.Observation?.Trim()
             };
 
             if (!rs.Attach(ValidateOrder<CreateResponse>(order)).Success)
@@ -163,13 +161,12 @@ namespace LaNata_Api.Core.Services
 
             var previous = order.Clone();
 
-            order.ClientName = TextHelper.ToTitleCase(rq.ClientName);
-            order.Phone = TextHelper.ToNumber(rq.Phone);
-            order.EventAddress = TextHelper.ToUpperFirst(rq.EventAddress);
+            order.ClientName = rq.ClientName?.Trim();
+            order.Phone = rq.Phone?.Trim();
+            order.EventAddress = rq.EventAddress?.Trim();
             order.Date = NormalizeEventDate(rq.Date);
             order.ShipmentPrice = rq.ShipmentPrice;
-            order.Observation = TextHelper.ToUpperFirst(rq.Observation);
-            order.UpdatedAt = DateTime.UtcNow;
+            order.Observation = rq.Observation?.Trim();
 
             if (!rs.Attach(ValidateOrder(order)).Success)
                 return rs;
@@ -198,17 +195,14 @@ namespace LaNata_Api.Core.Services
         {
             var rs = new BaseResponse();
 
-            if (rq == null || rq.Id <= 0)
-                return rs.SetError(Messages.Error.FieldGraterThanZero("id"));
+            if (rq == null)
+                return rs.SetError(Messages.Error.EntityNotFound("Pedido"));
 
             var order = await _db.Order.FirstOrDefaultAsync(x => x.Id == rq.Id);
 
             if (order == null)
                 return rs.SetError(Messages.Error.EntityNotFound("Pedido"));
 
-            // Soft delete on the order only, as the legacy did. The lines stay: they have no
-            // deleted_at column, and the stock they reserve is released anyway because every
-            // availability query reaches them through Order, which is filtered.
             order.DeletedAt = DateTime.UtcNow;
 
             try
@@ -228,7 +222,6 @@ namespace LaNata_Api.Core.Services
         #endregion
 
         #region Methods
-        // Days that already hold at least one order, for the calendar on the orders screen
         public async Task<BaseResponse<GetDatesResponse>> GetDates(GetDatesRequest rq)
         {
             rq ??= new GetDatesRequest();
@@ -244,7 +237,6 @@ namespace LaNata_Api.Core.Services
 
             var rangeEnd = dateTo.AddDays(1);
 
-            // Grouped on the date part: stored rows carry a time, and the calendar wants one entry per day regardless of it
             rs.Data = new GetDatesResponse
             {
                 Items = await _db
@@ -268,17 +260,17 @@ namespace LaNata_Api.Core.Services
         {
             var rs = new BaseResponse();
 
-            if (rq == null || rq.OrderId <= 0)
-                return rs.SetError(Messages.Error.FieldGraterThanZero("pedido"));
-
-            if (rq.ProductId <= 0)
-                return rs.SetError(Messages.Error.FieldGraterThanZero("producto"));
+            if (rq == null)
+                return rs.SetError(Messages.Error.EntityNotFound("Pedido"));
 
             if (rq.Quantity <= 0)
                 return rs.SetError(Messages.Error.FieldGraterThanZero("cantidad"));
 
-            if (rq.Quantity > QuantityMax)
+            if (rq.Quantity > ValidationLimits.OrderQuantityMax)
                 return rs.SetError(Messages.Error.InvalidField("cantidad"));
+
+            if (rq.UnitPrice.HasValue && (rq.UnitPrice.Value <= 0 || rq.UnitPrice.Value > ValidationLimits.ProductPriceMax))
+                return rs.SetError(Messages.Error.InvalidField("precio unitario"));
 
             var order = await _db
                 .Order
@@ -315,7 +307,7 @@ namespace LaNata_Api.Core.Services
             }
             else
             {
-                if (line.Quantity + rq.Quantity > QuantityMax)
+                if (line.Quantity + rq.Quantity > ValidationLimits.OrderQuantityMax)
                     return rs.SetError(Messages.Error.InvalidField("cantidad"));
 
                 line.Quantity += rq.Quantity;
@@ -347,14 +339,17 @@ namespace LaNata_Api.Core.Services
         {
             var rs = new BaseResponse();
 
-            if (rq == null || rq.OrderId <= 0)
-                return rs.SetError(Messages.Error.FieldGraterThanZero("pedido"));
-
-            if (rq.ProductId <= 0)
-                return rs.SetError(Messages.Error.FieldGraterThanZero("producto"));
+            if (rq == null)
+                return rs.SetError(Messages.Error.EntityNotFound("Pedido"));
 
             if (rq.Quantity <= 0)
                 return rs.SetError(Messages.Error.FieldGraterThanZero("cantidad"));
+
+            if (rq.Quantity > ValidationLimits.OrderQuantityMax)
+                return rs.SetError(Messages.Error.InvalidField("cantidad"));
+
+            if (rq.UnitPrice <= 0 || rq.UnitPrice > ValidationLimits.ProductPriceMax)
+                return rs.SetError(Messages.Error.InvalidField("precio unitario"));
 
             var order = await _db.Order.FirstOrDefaultAsync(x => x.Id == rq.OrderId);
             if (order == null)
@@ -374,7 +369,7 @@ namespace LaNata_Api.Core.Services
             var isFullRemoval = rq.Quantity == line.Quantity;
             var product = (await LoadLineProducts([line])).GetValueOrDefault(line.ProductId);
 
-            // Hard delete, like the legacy: the join table has no deleted_at to soft delete into
+            // Hard delete
             if (isFullRemoval)
                 _db.ProductOrder.Remove(line);
             else
@@ -434,13 +429,12 @@ namespace LaNata_Api.Core.Services
             return rs;
         }
 
-        // The order detail the legacy printed: the same document with or without prices
         public async Task<BaseResponse<ReportFile>> Report(ReportRequest rq)
         {
             var rs = new BaseResponse<ReportFile>();
 
-            if (rq == null || rq.Id <= 0)
-                return rs.SetError(Messages.Error.FieldGraterThanZero("id"));
+            if (rq == null)
+                return rs.SetError(Messages.Error.EntityNotFound("Pedido"));
 
             var order = await _db
                 .Order
@@ -497,13 +491,16 @@ namespace LaNata_Api.Core.Services
             return rs;
         }
 
-        // Quote for an order that has not been created yet
         public async Task<BaseResponse<ReportFile>> Budget(BudgetRequest rq)
         {
             var rs = new BaseResponse<ReportFile>();
 
             if (rq == null || rq.Products == null || rq.Products.Count == 0)
                 return rs.SetError(Messages.Error.OrderWithoutProducts());
+
+            var validationError = ValidateBudgetRequest(rq);
+            if (validationError != null)
+                return rs.SetError(validationError);
 
             var productIds = rq.Products.Select(x => x.ProductId).Distinct().ToList();
             var products = await _db.Product.AsNoTracking().Where(x => productIds.Contains(x.Id)).ToListAsync();
@@ -534,16 +531,16 @@ namespace LaNata_Api.Core.Services
 
             rs = GenerateDetailReport(rows, withPrice: true, "presupuesto", new List<ReportField>
             {
-                new("Cliente", TextHelper.ToTitleCase(rq.ClientName) ?? "-"),
+                new("Cliente", rq.ClientName?.Trim() ?? "-"),
                 new("Fecha", rq.Date == default ? "-" : rq.Date.ToString("dd/MM/yyyy")),
-                new("Lugar", TextHelper.ToUpperFirst(rq.EventAddress) ?? "-")
+                new("Lugar", rq.EventAddress?.Trim() ?? "-")
             });
 
             if (rs.Success)
             {
                 await AuditDocument(AuditActionCode.REPORT_GENERATED, rs.Data.FileName, rows.Count, "Pdf",
                 [
-                    new("Presupuesto", TextHelper.ToTitleCase(rq.ClientName) ?? "-")
+                    new("Presupuesto", rq.ClientName?.Trim() ?? "-")
                 ]);
             }
 
@@ -576,7 +573,7 @@ namespace LaNata_Api.Core.Services
             });
         }
 
-        private async Task AuditProductLine(string actionCode, Order order, Product product, int quantity, double unitPrice)
+        private async Task AuditProductLine(string actionCode, Order order, Product product, int quantity, decimal unitPrice)
         {
             await _auditService.Audit(new AuditRequest
             {
@@ -624,26 +621,26 @@ namespace LaNata_Api.Core.Services
             if (string.IsNullOrWhiteSpace(order.ClientName))
                 return rs.SetError(Messages.Error.FieldRequired("cliente"));
 
-            if (order.ClientName.Length > ClientNameMaxLength)
-                return rs.SetError(Messages.Error.FieldTooLong("cliente", ClientNameMaxLength));
+            if (order.ClientName.Length > ValidationLimits.OrderClientNameMaxLength)
+                return rs.SetError(Messages.Error.FieldTooLong("cliente", ValidationLimits.OrderClientNameMaxLength));
 
             if (string.IsNullOrWhiteSpace(order.EventAddress))
                 return rs.SetError(Messages.Error.FieldRequired("dirección"));
 
-            if (order.EventAddress.Length > AddressMaxLength)
-                return rs.SetError(Messages.Error.FieldTooLong("dirección", AddressMaxLength));
+            if (order.EventAddress.Length > ValidationLimits.OrderAddressMaxLength)
+                return rs.SetError(Messages.Error.FieldTooLong("dirección", ValidationLimits.OrderAddressMaxLength));
 
             if (order.Date == default)
                 return rs.SetError(Messages.Error.FieldRequired("fecha"));
 
-            if (!string.IsNullOrEmpty(order.Phone) && order.Phone.Length > PhoneMaxLength)
-                return rs.SetError(Messages.Error.FieldTooLong("teléfono", PhoneMaxLength));
+            if (!string.IsNullOrEmpty(order.Phone) && order.Phone.Length > ValidationLimits.OrderPhoneMaxLength)
+                return rs.SetError(Messages.Error.FieldTooLong("teléfono", ValidationLimits.OrderPhoneMaxLength));
 
-            if (order.ShipmentPrice.HasValue && (order.ShipmentPrice.Value < 0 || order.ShipmentPrice.Value > ShipmentPriceMax))
+            if (order.ShipmentPrice.HasValue && (order.ShipmentPrice.Value < 0 || order.ShipmentPrice.Value > ValidationLimits.OrderShipmentPriceMax))
                 return rs.SetError(Messages.Error.InvalidField("flete"));
 
-            if (!string.IsNullOrEmpty(order.Observation) && order.Observation.Length > ObservationMaxLength)
-                return rs.SetError(Messages.Error.FieldTooLong("observación", ObservationMaxLength));
+            if (!string.IsNullOrEmpty(order.Observation) && order.Observation.Length > ValidationLimits.OrderObservationMaxLength)
+                return rs.SetError(Messages.Error.FieldTooLong("observación", ValidationLimits.OrderObservationMaxLength));
 
             return rs;
         }
@@ -692,7 +689,7 @@ namespace LaNata_Api.Core.Services
             if (requestProducts.Any(x => x == null || x.ProductId <= 0))
                 return rs.SetError(Messages.Error.FieldGraterThanZero("producto"));
 
-            if (requestProducts.Any(x => x.Quantity <= 0 || x.Quantity > QuantityMax))
+            if (requestProducts.Any(x => x.Quantity <= 0 || x.Quantity > ValidationLimits.OrderQuantityMax))
                 return rs.SetError(Messages.Error.FieldGraterThanZero("cantidad"));
 
             // The same product can arrive more than once in the basket, so it is summed before the
@@ -733,26 +730,43 @@ namespace LaNata_Api.Core.Services
             rs.Data = lines;
             return rs;
         }
+
+        private static string ValidateBudgetRequest(BudgetRequest rq)
+        {
+            if (!string.IsNullOrEmpty(rq.ClientName) && rq.ClientName.Length > ValidationLimits.OrderClientNameMaxLength)
+                return Messages.Error.FieldTooLong("cliente", ValidationLimits.OrderClientNameMaxLength);
+
+            if (!string.IsNullOrEmpty(rq.EventAddress) && rq.EventAddress.Length > ValidationLimits.OrderAddressMaxLength)
+                return Messages.Error.FieldTooLong("dirección", ValidationLimits.OrderAddressMaxLength);
+
+            if (rq.ShipmentPrice.HasValue && (rq.ShipmentPrice.Value < 0 || rq.ShipmentPrice.Value > ValidationLimits.OrderShipmentPriceMax))
+                return Messages.Error.InvalidField("flete");
+
+            if (rq.Products.Any(x => x == null || x.ProductId <= 0))
+                return Messages.Error.FieldGraterThanZero("producto");
+
+            if (rq.Products.Any(x => x.Quantity <= 0 || x.Quantity > ValidationLimits.OrderQuantityMax))
+                return Messages.Error.FieldGraterThanZero("cantidad");
+
+            return null;
+        }
         #endregion
 
         #region Helpers
         // What is left of a product on an event date once the orders of that day are discounted.
-        // excludeOrderId keeps the order being edited out of the count, so its own reservation is
-        // not read as somebody else's.
-        private async Task<long> GetAvailableStock(Product product, DateTime date, int? excludeOrderId)
+        private async Task<int> GetAvailableStock(Product product, DateTime date, int? excludeOrderId)
         {
             var dayStart = date.Date;
             var dayEnd = dayStart.AddDays(1);
 
-            // Navigating through x.Order applies the soft-delete query filter, so cancelled orders
-            // release the stock they had reserved
+            // Navigating through x.Order applies the soft-delete query filter, so cancelled orders release the stock they had reserved
             var reserved = await _db
                 .ProductOrder
                 .Where(x => x.ProductId == product.Id
                     && x.Order.Date >= dayStart
                     && x.Order.Date < dayEnd
                     && (!excludeOrderId.HasValue || x.OrderId != excludeOrderId.Value))
-                .SumAsync(x => (long?)x.Quantity) ?? 0;
+                .SumAsync(x => (int?)x.Quantity) ?? 0;
 
             return product.Stock - reserved;
         }
@@ -821,8 +835,8 @@ namespace LaNata_Api.Core.Services
             });
         }
 
-        // The shipment is printed as one more line, the way the legacy detail did it
-        private static List<OrderReportRow> AppendShipmentRow(List<OrderReportRow> rows, double? shipmentPrice)
+        // The shipment is printed as one more line
+        private static List<OrderReportRow> AppendShipmentRow(List<OrderReportRow> rows, decimal? shipmentPrice)
         {
             if (shipmentPrice.HasValue)
             {
@@ -839,12 +853,12 @@ namespace LaNata_Api.Core.Services
             return rows;
         }
 
-        private static string Currency(double value)
+        private static string Currency(decimal value)
         {
             return value.ToString("C2", ReportCulture.Current);
         }
 
-        private static double CalculateTotal(Order order)
+        private static decimal CalculateTotal(Order order)
         {
             return order.Products.Sum(x => x.Quantity * x.UnitPrice) + (order.ShipmentPrice ?? 0);
         }
@@ -895,7 +909,7 @@ namespace LaNata_Api.Core.Services
                 Description = product?.Description,
                 Quantity = line.Quantity,
                 UnitPrice = line.UnitPrice,
-                BreakPrice = product?.BreakPrice ?? 0,
+                BreakPrice = product?.BreakPrice,
                 Subtotal = line.Quantity * line.UnitPrice
             };
         }

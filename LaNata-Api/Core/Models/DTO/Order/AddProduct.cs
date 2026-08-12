@@ -8,6 +8,6 @@ namespace LaNata_Api.Core.Models.DTO.Order
 
         // When set, the quantity joins the existing line at that price instead of opening a new one
         // at the current catalogue price. This is how the legacy screen kept an old price alive.
-        public double? UnitPrice { get; set; }
+        public decimal? UnitPrice { get; set; }
     }
 }

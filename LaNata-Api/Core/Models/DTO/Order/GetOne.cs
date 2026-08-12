@@ -15,10 +15,10 @@ namespace LaNata_Api.Core.Models.DTO.Order
         public string Phone { get; set; }
         public string EventAddress { get; set; }
         public DateTime Date { get; set; }
-        public double? ShipmentPrice { get; set; }
+        public decimal? ShipmentPrice { get; set; }
         public string Observation { get; set; }
-        public double ProductsTotal { get; set; }
-        public double Total { get; set; }
+        public decimal ProductsTotal { get; set; }
+        public decimal Total { get; set; }
         public DateTime CreatedAt { get; set; }
         public DateTime? UpdatedAt { get; set; }
         public List<OrderProductResponse> Products { get; set; } = [];
@@ -31,8 +31,8 @@ namespace LaNata_Api.Core.Models.DTO.Order
         public int ProductId { get; set; }
         public string Description { get; set; }
         public int Quantity { get; set; }
-        public double UnitPrice { get; set; }
-        public double BreakPrice { get; set; }
-        public double Subtotal { get; set; }
+        public decimal UnitPrice { get; set; }
+        public decimal? BreakPrice { get; set; }
+        public decimal Subtotal { get; set; }
     }
 }

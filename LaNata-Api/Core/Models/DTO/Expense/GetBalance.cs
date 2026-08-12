@@ -14,9 +14,9 @@ namespace LaNata_Api.Core.Models.DTO.Expense
     {
         public DateTime DateFrom { get; set; }
         public DateTime DateTo { get; set; }
-        public double TotalExpenses { get; set; }
-        public double TotalIncome { get; set; }
-        public double Profit { get; set; }
+        public decimal TotalExpenses { get; set; }
+        public decimal TotalIncome { get; set; }
+        public decimal Profit { get; set; }
         public List<ExpenseItem> Expenses { get; set; } = [];
         public List<IncomeItem> Income { get; set; } = [];
 
@@ -25,7 +25,7 @@ namespace LaNata_Api.Core.Models.DTO.Expense
             public int Id { get; set; }
             public DateTime Date { get; set; }
             public string Description { get; set; }
-            public double Price { get; set; }
+            public decimal Price { get; set; }
         }
 
         public class IncomeItem
@@ -34,8 +34,8 @@ namespace LaNata_Api.Core.Models.DTO.Expense
             public DateTime Date { get; set; }
             public string ClientName { get; set; }
             public string EventAddress { get; set; }
-            public double? ShipmentPrice { get; set; }
-            public double Total { get; set; }
+            public decimal? ShipmentPrice { get; set; }
+            public decimal Total { get; set; }
         }
     }
 }

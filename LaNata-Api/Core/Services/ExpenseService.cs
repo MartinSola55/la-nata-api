@@ -28,9 +28,6 @@ namespace LaNata_Api.Core.Services
 {
     public class ExpenseService(APIContext context, AuditService auditService, ExportService exportService, ReportService reportService, TokenService tokenService)
     {
-        private const int DescriptionMaxLength = 500;
-        private const double PriceMax = 1000000;
-
         private readonly APIContext _db = context;
         private readonly AuditService _auditService = auditService;
         private readonly ExportService _exportService = exportService;
@@ -43,6 +40,11 @@ namespace LaNata_Api.Core.Services
             rq ??= new GetAllRequest();
 
             var rs = new BaseResponse<GetAllResponse>();
+
+            var validationError = ServiceRequestValidator.ValidateSort(rq)
+                ?? ServiceRequestValidator.ValidateSearch(rq.Search);
+            if (validationError != null)
+                return rs.SetError(validationError);
 
             if (rq.DateFrom.HasValue && rq.DateTo.HasValue && rq.DateFrom > rq.DateTo)
                 return rs.SetError(Messages.Error.InvalidDateRange());
@@ -106,7 +108,7 @@ namespace LaNata_Api.Core.Services
             var expense = new Expense
             {
                 Date = rq.Date.Date,
-                Description = TextHelper.ToUpperFirst(rq.Description),
+                Description = rq.Description?.Trim(),
                 Price = rq.Price
             };
 
@@ -151,7 +153,7 @@ namespace LaNata_Api.Core.Services
             var previous = expense.Clone();
 
             expense.Date = rq.Date.Date;
-            expense.Description = TextHelper.ToUpperFirst(rq.Description);
+            expense.Description = rq.Description?.Trim();
             expense.Price = rq.Price;
             expense.UpdatedAt = DateTime.UtcNow;
 
@@ -388,10 +390,10 @@ namespace LaNata_Api.Core.Services
             if (string.IsNullOrWhiteSpace(expense.Description))
                 return rs.SetError(Messages.Error.FieldRequired("descripción"));
 
-            if (expense.Description.Length > DescriptionMaxLength)
-                return rs.SetError(Messages.Error.FieldTooLong("descripción", DescriptionMaxLength));
+            if (expense.Description.Length > ValidationLimits.ExpenseDescriptionMaxLength)
+                return rs.SetError(Messages.Error.FieldTooLong("descripción", ValidationLimits.ExpenseDescriptionMaxLength));
 
-            if (expense.Price <= 0 || expense.Price > PriceMax)
+            if (expense.Price <= 0 || expense.Price > ValidationLimits.ExpensePriceMax)
                 return rs.SetError(Messages.Error.FieldGraterThanZero("monto"));
 
             return rs;
@@ -471,7 +473,7 @@ namespace LaNata_Api.Core.Services
             return await query.ToListAsync();
         }
 
-        private static string Currency(double value)
+        private static string Currency(decimal value)
         {
             return value.ToString("C2", ReportCulture.Current);
         }

@@ -20,11 +20,11 @@ namespace LaNata_Api.Core.Models.DTO.Product
         {
             public int Id { get; set; }
             public string Description { get; set; }
-            public double Price { get; set; }
-            public double BreakPrice { get; set; }
-            public long Stock { get; set; }
-            public long AvailableStock { get; set; }
-            public long ReservedStock { get; set; }
+            public decimal Price { get; set; }
+            public decimal? BreakPrice { get; set; }
+            public int Stock { get; set; }
+            public int AvailableStock { get; set; }
+            public int ReservedStock { get; set; }
         }
     }
 }

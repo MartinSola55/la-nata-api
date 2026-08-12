@@ -1,10 +1,3 @@
-using Microsoft.AspNetCore.Http;
-using Microsoft.EntityFrameworkCore;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text.Json.Nodes;
-using System.Threading.Tasks;
 using LaNata_Api.Audit.Models;
 using LaNata_Api.Audit.Models.Constants;
 using LaNata_Api.Audit.Models.DTO;
@@ -15,13 +8,25 @@ using LaNata_Api.Core.Models.Constants;
 using LaNata_Api.Core.Models.DTO;
 using LaNata_Api.Core.Models.Internal;
 using LaNata_Api.Core.Services;
+using Microsoft.AspNetCore.Http;
+using Microsoft.EntityFrameworkCore;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json.Nodes;
+using System.Threading.Tasks;
 
 namespace LaNata_Api.Audit.Services
 {
     public class AuditService(APIContext context, DbContextOptions<APIContext> contextOptions, TokenService tokenService, IHttpContextAccessor httpContextAccessor)
     {
+        private const int ACTION_CODE_MAX_LENGTH = 100;
+        private const int ENTITY_MAX_LENGTH = 100;
+        private const int ENTITY_KEY_MAX_LENGTH = 100;
         private const int NAME_MAX_LENGTH = 200;
         private const int DESCRIPTION_MAX_LENGTH = 1000;
+        private const int USER_EMAIL_MAX_LENGTH = 256;
+        private const int IP_ADDRESS_MAX_LENGTH = 64;
 
         private readonly APIContext _db = context;
         private readonly DbContextOptions<APIContext> _contextOptions = contextOptions;
@@ -29,8 +34,6 @@ namespace LaNata_Api.Audit.Services
         private readonly IHttpContextAccessor _httpContextAccessor = httpContextAccessor;
 
         #region Methods
-        // Never throws: a failed audit returns an error instead of breaking the operation that
-        // triggered it
         public async Task<BaseResponse> Audit(AuditRequest rq)
         {
             var rs = new BaseResponse();
@@ -40,6 +43,12 @@ namespace LaNata_Api.Audit.Services
 
             if (string.IsNullOrWhiteSpace(rq.Entity))
                 return rs.SetError(AuditMessages.EntityRequired());
+
+            if (rq.ActionCode.Length > ACTION_CODE_MAX_LENGTH)
+                return rs.SetError(Messages.Error.FieldTooLong("acción", ACTION_CODE_MAX_LENGTH));
+
+            if (rq.Entity.Length > ENTITY_MAX_LENGTH)
+                return rs.SetError(Messages.Error.FieldTooLong("entidad", ENTITY_MAX_LENGTH));
 
             try
             {
@@ -51,13 +60,13 @@ namespace LaNata_Api.Audit.Services
                     Date = rq.Date ?? DateTime.UtcNow,
                     ActionCode = rq.ActionCode,
                     Entity = rq.Entity,
-                    EntityKey = rq.EntityKey,
+                    EntityKey = Truncate(rq.EntityKey, ENTITY_KEY_MAX_LENGTH),
                     Name = Truncate(rq.Name, NAME_MAX_LENGTH),
                     Description = Truncate(rq.Description, DESCRIPTION_MAX_LENGTH),
                     UserId = rq.UserId ?? _token?.UserId,
                     UserName = Truncate(rq.UserName ?? _token?.Email, NAME_MAX_LENGTH),
-                    UserEmail = rq.UserEmail ?? _token?.Email,
-                    IpAddress = rq.IpAddress ?? _httpContextAccessor.HttpContext?.Connection?.RemoteIpAddress?.ToString(),
+                    UserEmail = Truncate(rq.UserEmail ?? _token?.Email, USER_EMAIL_MAX_LENGTH),
+                    IpAddress = Truncate(rq.IpAddress ?? _httpContextAccessor.HttpContext?.Connection?.RemoteIpAddress?.ToString(), IP_ADDRESS_MAX_LENGTH),
                     State = (rq.State ?? rq.Changes?.State).Serialize(),
                     Payload = (rq.Payload ?? rq.Changes?.Payload).Serialize(),
                     Summary = rq.Changes?.Changes.Serialize()
@@ -81,6 +90,13 @@ namespace LaNata_Api.Audit.Services
         #region CRUD
         public async Task<BaseResponse<GetAllResponse>> GetAll(GetAllRequest rq)
         {
+            rq ??= new GetAllRequest();
+            var sr = new BaseResponse<GetAllResponse>();
+
+            var validationError = ValidateGetAllRequest(rq);
+            if (validationError != null)
+                return sr.SetError(validationError);
+
             var query = _db
                 .AuditEntry
                 .AsNoTracking()
@@ -91,32 +107,31 @@ namespace LaNata_Api.Audit.Services
             query = FilterQuery(query, rq);
             query = OrderQuery(query, rq);
 
-            return new BaseResponse<GetAllResponse>
+            sr.Data = new GetAllResponse
             {
-                Data = new GetAllResponse
-                {
-                    Items = await query
-                        .Select(x => new GetAllResponse.Item
-                        {
-                            Id = x.Id,
-                            Date = x.Date,
-                            ActionCode = x.ActionCode,
-                            ActionName = x.Action.ActionName,
-                            CategoryCode = x.Action.CategoryCode,
-                            CategoryName = x.Action.Category.CategoryName,
-                            Entity = x.Entity,
-                            EntityKey = x.EntityKey,
-                            Name = x.Name,
-                            Description = x.Description,
-                            UserId = x.UserId,
-                            UserName = x.UserName,
-                            UserEmail = x.UserEmail
-                        })
-                        .Skip((rq.Page - 1) * Pagination.DefaultPageSize)
-                        .Take(Pagination.DefaultPageSize)
-                        .ToListAsync()
-                }
+                Items = await query
+                    .Select(x => new GetAllResponse.Item
+                    {
+                        Id = x.Id,
+                        Date = x.Date,
+                        ActionCode = x.ActionCode,
+                        ActionName = x.Action.ActionName,
+                        CategoryCode = x.Action.CategoryCode,
+                        CategoryName = x.Action.Category.CategoryName,
+                        Entity = x.Entity,
+                        EntityKey = x.EntityKey,
+                        Name = x.Name,
+                        Description = x.Description,
+                        UserId = x.UserId,
+                        UserName = x.UserName,
+                        UserEmail = x.UserEmail
+                    })
+                    .Skip((rq.Page - 1) * Pagination.DefaultPageSize)
+                    .Take(Pagination.DefaultPageSize)
+                    .ToListAsync()
             };
+
+            return sr;
         }
 
         public async Task<BaseResponse<GetOneResponse>> GetOne(GetOneRequest rq)
@@ -193,6 +208,27 @@ namespace LaNata_Api.Audit.Services
         #endregion
 
         #region Private
+        private static string ValidateGetAllRequest(GetAllRequest rq)
+        {
+            var paginationError = ServiceRequestValidator.ValidatePagination(rq);
+            if (paginationError != null)
+                return paginationError;
+
+            if (rq.DateFrom.HasValue && rq.DateTo.HasValue && rq.DateFrom > rq.DateTo)
+                return Messages.Error.InvalidDateRange();
+
+            if (!string.IsNullOrEmpty(rq.Entity) && rq.Entity.Length > ENTITY_MAX_LENGTH)
+                return Messages.Error.FieldTooLong("entidad", ENTITY_MAX_LENGTH);
+
+            if (!string.IsNullOrEmpty(rq.EntityKey) && rq.EntityKey.Length > ENTITY_KEY_MAX_LENGTH)
+                return Messages.Error.FieldTooLong("id de entidad", ENTITY_KEY_MAX_LENGTH);
+
+            if (rq.UserId.HasValue && rq.UserId.Value <= 0)
+                return Messages.Error.FieldGraterThanZero("usuario");
+
+            return ServiceRequestValidator.ValidateSearch(rq.Search);
+        }
+
         private static IQueryable<AuditEntry> FilterQuery(IQueryable<AuditEntry> query, GetAllRequest rq)
         {
             if (rq.DateFrom.HasValue)

@@ -18,8 +18,6 @@ namespace LaNata_Api.Core.Services
 {
     public class UserService(APIContext context, TokenService tokenService, AuthService authService, AuditService auditService)
     {
-        private const int EmailMaxLength = 60;
-
         private readonly APIContext _db = context;
         private readonly TokenService _tokenService = tokenService;
         private readonly AuthService _authService = authService;
@@ -46,6 +44,12 @@ namespace LaNata_Api.Core.Services
 
         public async Task<BaseResponse<BaseComboResponse>> GetComboUsers(GetComboUsersRequest rq)
         {
+            rq ??= new GetComboUsersRequest();
+
+            var validationError = ServiceRequestValidator.ValidatePositiveId(rq?.UserId, "usuario");
+            if (validationError != null)
+                return new BaseResponse<BaseComboResponse>().SetError(validationError);
+
             var token = _tokenService.GetToken();
             var query = _db
                 .User
@@ -78,6 +82,13 @@ namespace LaNata_Api.Core.Services
         {
             rq ??= new GetAllRequest();
 
+            var validationError = ServiceRequestValidator.ValidatePagination(rq);
+            if (validationError != null)
+                return new BaseResponse<GetAllResponse>().SetError(validationError);
+
+            if (rq.Roles.Any(x => x <= 0))
+                return new BaseResponse<GetAllResponse>().SetError(Messages.Error.FieldGraterThanZero("rol"));
+
             var query = _db.User.AsQueryable();
 
             query = FilterQuery(query, rq);
@@ -107,6 +118,9 @@ namespace LaNata_Api.Core.Services
         {
             var rs = new BaseResponse<GetOneResponse>();
             var token = _tokenService.GetToken();
+
+            if (rq == null || rq.Id <= 0)
+                return rs.SetError(Messages.Error.FieldGraterThanZero("id"));
 
             if (!_authService.IsAdmin() && rq.Id != token.UserId)
                 return rs.SetError(Messages.Error.Unauthorized());
@@ -383,8 +397,8 @@ namespace LaNata_Api.Core.Services
             if (!ValidateEmail(user.Email))
                 return rs.SetError(Messages.Error.InvalidEmail());
 
-            if (user.Email.Length > EmailMaxLength)
-                return rs.SetError(Messages.Error.FieldTooLong("email", EmailMaxLength));
+            if (user.Email.Length > ValidationLimits.UserEmailMaxLength)
+                return rs.SetError(Messages.Error.FieldTooLong("email", ValidationLimits.UserEmailMaxLength));
 
             if (checkPassword && (string.IsNullOrEmpty(password) || !_authService.ValidatePassword(password)))
                 return rs.SetError(Messages.Error.InvalidPassword());

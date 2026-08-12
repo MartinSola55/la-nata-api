@@ -9,11 +9,7 @@ namespace LaNata_Api.Core.Models
     {
         [Key]
         public int Id { get; set; }
-
-        [Required]
-        [MaxLength(260)]
         public string FileName { get; set; }
-
         public DateTime ExecutedAt { get; set; }
     }
 }

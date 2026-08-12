@@ -5,8 +5,6 @@ using LaNata_Api.Core.Models;
 
 namespace LaNata_Api.Core.DAL.DB
 {
-    // The model maps onto the legacy production schema: table and column names come from [Table] and
-    // [Column] attributes on the entities, and money is double because the columns are float.
     public class APIContext(DbContextOptions<APIContext> options) : DbContext(options)
     {
         protected override void OnModelCreating(ModelBuilder builder)

@@ -23,10 +23,10 @@ namespace LaNata_Api.Core.Models.DTO.Order
             public string Phone { get; set; }
             public string EventAddress { get; set; }
             public DateTime Date { get; set; }
-            public double? ShipmentPrice { get; set; }
+            public decimal? ShipmentPrice { get; set; }
             public string Observation { get; set; }
             public int ProductsCount { get; set; }
-            public double Total { get; set; }
+            public decimal Total { get; set; }
             public DateTime CreatedAt { get; set; }
         }
     }

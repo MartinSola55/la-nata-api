@@ -17,7 +17,7 @@ namespace LaNata_Api.Core.Models.DTO.Order
         public string ClientName { get; set; }
         public string EventAddress { get; set; }
         public DateTime Date { get; set; }
-        public double? ShipmentPrice { get; set; }
+        public decimal? ShipmentPrice { get; set; }
         public List<OrderProductRequest> Products { get; set; } = [];
     }
 }

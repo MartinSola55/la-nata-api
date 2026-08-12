@@ -36,6 +36,18 @@ namespace LaNata_Api.Core.Services
                 return rs.SetError(Messages.Error.InvalidEmail());
             }
 
+            if (rq.Email.Length > ValidationLimits.UserEmailMaxLength)
+            {
+                await AuditLoginFailed(rq.Email, null, "Email demasiado largo");
+                return rs.SetError(Messages.Error.FieldTooLong("email", ValidationLimits.UserEmailMaxLength));
+            }
+
+            if (rq.Password.Length > ValidationLimits.PasswordMaxLength)
+            {
+                await AuditLoginFailed(rq.Email, null, "Contraseña demasiado larga");
+                return rs.SetError(Messages.Error.FieldTooLong("contraseña", ValidationLimits.PasswordMaxLength));
+            }
+
             var email = rq.Email.ToLower();
             var user = await _db
                 .User
@@ -112,8 +124,12 @@ namespace LaNata_Api.Core.Services
 
         public bool ValidatePassword(string password)
         {
+            if (string.IsNullOrEmpty(password))
+                return false;
+
             return new bool[] {
-                password.Length >= 8,
+                password.Length >= ValidationLimits.PasswordMinLength,
+                password.Length <= ValidationLimits.PasswordMaxLength,
                 password.Any(char.IsUpper),
                 password.Any(char.IsLower),
                 password.Any(char.IsDigit),

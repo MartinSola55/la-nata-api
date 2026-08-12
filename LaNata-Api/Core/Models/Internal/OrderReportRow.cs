@@ -6,8 +6,8 @@ namespace LaNata_Api.Core.Models.Internal
     {
         public string Description { get; set; }
         public int Quantity { get; set; }
-        public double UnitPrice { get; set; }
-        public double? BreakPrice { get; set; }
-        public double Subtotal { get; set; }
+        public decimal UnitPrice { get; set; }
+        public decimal? BreakPrice { get; set; }
+        public decimal Subtotal { get; set; }
     }
 }

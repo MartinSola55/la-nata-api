@@ -26,10 +26,6 @@ namespace LaNata_Api.Core.Services
 {
     public class ProductService(APIContext context, AuditService auditService, ExportService exportService, ReportService reportService, TokenService tokenService)
     {
-        private const int DescriptionMaxLength = 255;
-        private const long StockMax = 10000;
-        private const double PriceMax = 10000000;
-
         private readonly APIContext _db = context;
         private readonly AuditService _auditService = auditService;
         private readonly ExportService _exportService = exportService;
@@ -60,6 +56,11 @@ namespace LaNata_Api.Core.Services
         public async Task<BaseResponse<GetAllResponse>> GetAll(GetAllRequest rq)
         {
             rq ??= new GetAllRequest();
+
+            var validationError = ServiceRequestValidator.ValidateSort(rq)
+                ?? ServiceRequestValidator.ValidateSearch(rq.Search);
+            if (validationError != null)
+                return new BaseResponse<GetAllResponse>().SetError(validationError);
 
             var query = _db.Product.AsQueryable();
 
@@ -123,7 +124,7 @@ namespace LaNata_Api.Core.Services
 
             var product = new Product
             {
-                Description = TextHelper.ToUpperFirst(rq.Description),
+                Description = rq.Description?.Trim(),
                 Stock = rq.Stock,
                 Price = rq.Price,
                 BreakPrice = rq.BreakPrice
@@ -170,7 +171,7 @@ namespace LaNata_Api.Core.Services
 
             var previous = product.Clone();
 
-            product.Description = TextHelper.ToUpperFirst(rq.Description);
+            product.Description = rq.Description?.Trim();
             product.Stock = rq.Stock;
             product.Price = rq.Price;
             product.BreakPrice = rq.BreakPrice;
@@ -235,6 +236,11 @@ namespace LaNata_Api.Core.Services
             if (rq == null || rq.Date == default)
                 return rs.SetError(Messages.Error.FieldRequired("fecha"));
 
+            var validationError = ServiceRequestValidator.ValidateSearch(rq.Search)
+                ?? ServiceRequestValidator.ValidatePositiveId(rq.ExcludeOrderId, "pedido");
+            if (validationError != null)
+                return rs.SetError(validationError);
+
             // Stored event dates carry a time component, so availability is counted over a day range
             var dayStart = rq.Date.Date;
             var dayEnd = dayStart.AddDays(1);
@@ -262,7 +268,7 @@ namespace LaNata_Api.Core.Services
                             .Where(po => po.Order.Date >= dayStart
                                 && po.Order.Date < dayEnd
                                 && (!rq.ExcludeOrderId.HasValue || po.OrderId != rq.ExcludeOrderId.Value))
-                            .Sum(po => (long?)po.Quantity) ?? 0
+                            .Sum(po => (int?)po.Quantity) ?? 0
                     })
                     .Select(x => new GetStockResponse.Item
                     {
@@ -415,16 +421,16 @@ namespace LaNata_Api.Core.Services
             if (string.IsNullOrWhiteSpace(product.Description))
                 return rs.SetError(Messages.Error.FieldRequired("descripción"));
 
-            if (product.Description.Length > DescriptionMaxLength)
-                return rs.SetError(Messages.Error.FieldTooLong("descripción", DescriptionMaxLength));
+            if (product.Description.Length > ValidationLimits.ProductDescriptionMaxLength)
+                return rs.SetError(Messages.Error.FieldTooLong("descripción", ValidationLimits.ProductDescriptionMaxLength));
 
-            if (product.Stock < 0 || product.Stock > StockMax)
+            if (product.Stock < 0 || product.Stock > ValidationLimits.ProductStockMax)
                 return rs.SetError(Messages.Error.InvalidField("stock"));
 
-            if (product.Price <= 0 || product.Price > PriceMax)
+            if (product.Price <= 0 || product.Price > ValidationLimits.ProductPriceMax)
                 return rs.SetError(Messages.Error.FieldGraterThanZero("precio"));
 
-            if (product.BreakPrice <= 0 || product.BreakPrice > PriceMax)
+            if (product.BreakPrice.HasValue && (product.BreakPrice <= 0 || product.BreakPrice > ValidationLimits.ProductPriceMax))
                 return rs.SetError(Messages.Error.FieldGraterThanZero("precio por rotura"));
 
             if (await _db.Product.AnyAsync(x => x.Description.ToLower() == product.Description.ToLower() && x.Id != product.Id))

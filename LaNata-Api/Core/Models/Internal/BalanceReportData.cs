@@ -8,9 +8,9 @@ namespace LaNata_Api.Core.Models.Internal
     {
         public DateTime DateFrom { get; set; }
         public DateTime DateTo { get; set; }
-        public double TotalExpenses { get; set; }
-        public double TotalIncome { get; set; }
-        public double Profit => TotalIncome - TotalExpenses;
+        public decimal TotalExpenses { get; set; }
+        public decimal TotalIncome { get; set; }
+        public decimal Profit => TotalIncome - TotalExpenses;
         public List<BalanceExpenseRow> Expenses { get; set; } = [];
         public List<BalanceIncomeRow> Income { get; set; } = [];
     }
@@ -20,7 +20,7 @@ namespace LaNata_Api.Core.Models.Internal
         public int Id { get; set; }
         public DateTime Date { get; set; }
         public string Description { get; set; }
-        public double Price { get; set; }
+        public decimal Price { get; set; }
     }
 
     public class BalanceIncomeRow
@@ -29,7 +29,7 @@ namespace LaNata_Api.Core.Models.Internal
         public DateTime Date { get; set; }
         public string ClientName { get; set; }
         public string EventAddress { get; set; }
-        public double? ShipmentPrice { get; set; }
-        public double Total { get; set; }
+        public decimal? ShipmentPrice { get; set; }
+        public decimal Total { get; set; }
     }
 }

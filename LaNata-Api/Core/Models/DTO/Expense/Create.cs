@@ -6,7 +6,7 @@ namespace LaNata_Api.Core.Models.DTO.Expense
     {
         public DateTime Date { get; set; }
         public string Description { get; set; }
-        public double Price { get; set; }
+        public decimal Price { get; set; }
     }
 
     public class CreateResponse
@@ -14,6 +14,6 @@ namespace LaNata_Api.Core.Models.DTO.Expense
         public int Id { get; set; }
         public DateTime Date { get; set; }
         public string Description { get; set; }
-        public double Price { get; set; }
+        public decimal Price { get; set; }
     }
 }

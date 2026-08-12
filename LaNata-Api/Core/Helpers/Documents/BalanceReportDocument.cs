@@ -27,7 +27,7 @@ namespace LaNata_Api.Core.Helpers.Documents
         }
 
         #region Private
-        private static void ComposeSection<T>(ColumnDescriptor column, string title, List<ReportColumn<T>> columns, List<T> rows, double total, bool isFirst)
+        private static void ComposeSection<T>(ColumnDescriptor column, string title, List<ReportColumn<T>> columns, List<T> rows, decimal total, bool isFirst)
         {
             column.Item()
                 .PaddingTop(isFirst ? 0 : ReportDimensions.SpacingXl)
@@ -69,7 +69,7 @@ namespace LaNata_Api.Core.Helpers.Documents
                 .Build();
         }
 
-        private static string Currency(double value)
+        private static string Currency(decimal value)
         {
             return value.ToString("C2", ReportCulture.Current);
         }
