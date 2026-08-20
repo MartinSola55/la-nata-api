@@ -241,11 +241,13 @@ namespace LaNata_Api.Core.Services
             if (variantsValidation.Error != null)
                 return rs.SetError(variantsValidation.Error.Message);
 
-            // Only a rise in the effective line price re-prices, and only the orders nobody has been charged for yet.
-            // For a variant that price includes its own previous/new surcharge.
-            var priceChanged = product.Price != previous.Price || product.BreakPrice != previous.BreakPrice;
-            var reprice = HasEffectivePriceIncrease(previous, product);
-            var result = new RepriceResult();
+            var coverageValidation = await ValidateStockCoverage(product, previous, previousVariants);
+            if (coverageValidation.Error != null)
+                return rs.SetError(coverageValidation.Error.Message);
+
+            // A move of the effective line price re-prices, either direction, only the unpaid orders
+            var reprice = HasEffectivePriceChange(previous, product);
+            var summary = new RepriceSummary();
 
             await using var transaction = await _db.Database.BeginTransactionAsync();
 
@@ -254,23 +256,10 @@ namespace LaNata_Api.Core.Services
                 await _db.SaveChangesAsync();
 
                 if (reprice)
-                    result = await RepriceOpenOrders(product, previous.Price, previousVariants);
+                    summary = await RepriceOpenOrders(product, previous.Price, previousVariants);
 
-                if (priceChanged)
-                {
-                    _db.ProductPriceHistory.Add(new ProductPriceHistory
-                    {
-                        ProductId = product.Id,
-                        PreviousPrice = previous.Price,
-                        NewPrice = product.Price,
-                        PreviousBreakPrice = previous.BreakPrice,
-                        NewBreakPrice = product.BreakPrice,
-                        ChangedBy = _tokenService.TryGetToken()?.UserId,
-                        RepricedOrders = result.Orders,
-                        RepricedLines = result.Lines,
-                        SkippedLines = result.Skipped
-                    });
-                }
+                foreach (var entry in BuildPriceHistory(product, previous, previousVariants, summary))
+                    _db.ProductPriceHistory.Add(entry);
 
                 await _db.SaveChangesAsync();
                 await transaction.CommitAsync();
@@ -286,8 +275,8 @@ namespace LaNata_Api.Core.Services
 
             AddVariantAudit(changes, previousVariants, LiveVariants(product));
 
-            if (result.Lines > 0 || result.Skipped > 0)
-                changes.Payload["Repricing"] = BuildRepricePayload(previous.Price, product.Price, result);
+            if (summary.Lines > 0 || summary.Skipped > 0)
+                changes.Payload["Repricing"] = BuildRepricePayload(previous.Price, product.Price, summary);
 
             await Audit(AuditActionCode.UPDATED, product, changes);
 
@@ -306,6 +295,11 @@ namespace LaNata_Api.Core.Services
             var product = await _db.Product.Include(x => x.Variants).FirstOrDefaultAsync(x => x.Id == rq.Id);
             if (product == null)
                 return rs.SetError(Messages.Error.EntityNotFound("Producto"));
+
+            // Retired, its lines stay pointing at it and the order can no longer be saved
+            var today = DateTime.UtcNow.Date;
+            if (await _db.ProductOrder.AnyAsync(x => x.ProductId == product.Id && x.Order.Date >= today))
+                return rs.SetError(Messages.Error.ProductInUse());
 
             var deletedVariants = LiveVariants(product);
 
@@ -339,29 +333,36 @@ namespace LaNata_Api.Core.Services
             if (rq == null || rq.Id <= 0)
                 return rs.SetError(Messages.Error.FieldGraterThanZero("id"));
 
-            rs.Data = new GetPriceHistoryResponse
-            {
-                Items = await _db
-                    .ProductPriceHistory
-                    .AsNoTracking()
-                    .Where(x => x.ProductId == rq.Id)
-                    .OrderByDescending(x => x.ChangedAt)
-                    .Select(x => new GetPriceHistoryResponse.Item
-                    {
-                        Id = x.Id,
-                        PreviousPrice = x.PreviousPrice,
-                        NewPrice = x.NewPrice,
-                        PreviousBreakPrice = x.PreviousBreakPrice,
-                        NewBreakPrice = x.NewBreakPrice,
-                        ChangedAt = x.ChangedAt,
-                        ChangedByEmail = x.ChangedByUser.Email,
-                        RepricedOrders = x.RepricedOrders,
-                        RepricedLines = x.RepricedLines,
-                        SkippedLines = x.SkippedLines
-                    })
-                    .ToListAsync()
-            };
+            var items = await _db
+                .ProductPriceHistory
+                .AsNoTracking()
+                .Where(x => x.ProductId == rq.Id)
+                .OrderByDescending(x => x.ChangedAt)
+                .Select(x => new GetPriceHistoryResponse.Item
+                {
+                    Id = x.Id,
+                    VariantId = x.VariantId,
+                    PreviousPrice = x.PreviousPrice,
+                    NewPrice = x.NewPrice,
+                    PreviousBreakPrice = x.PreviousBreakPrice,
+                    NewBreakPrice = x.NewBreakPrice,
+                    PreviousPriceExtra = x.PreviousPriceExtra,
+                    NewPriceExtra = x.NewPriceExtra,
+                    ChangedAt = x.ChangedAt,
+                    ChangedByEmail = x.ChangedByUser.Email,
+                    RepricedOrders = x.RepricedOrders,
+                    RepricedLines = x.RepricedLines,
+                    SkippedLines = x.SkippedLines
+                })
+                .ToListAsync();
 
+            // Filter off: projecting x.Variant.Description would blank a variant retired since
+            var variants = await LoadVariantNames(items.Select(x => x.VariantId));
+
+            foreach (var item in items.Where(x => x.VariantId.HasValue))
+                item.VariantDescription = variants.GetValueOrDefault(item.VariantId.Value);
+
+            rs.Data = new GetPriceHistoryResponse { Items = items };
             return rs;
         }
 
@@ -679,7 +680,7 @@ namespace LaNata_Api.Core.Services
             });
         }
 
-        private static Dictionary<string, object> BuildRepricePayload(decimal previousPrice, decimal newPrice, RepriceResult result)
+        private static Dictionary<string, object> BuildRepricePayload(decimal previousPrice, decimal newPrice, RepriceSummary result)
         {
             var payload = new Dictionary<string, object>
             {
@@ -742,6 +743,58 @@ namespace LaNata_Api.Core.Services
             return rs;
         }
 
+        // Only reductions: one already oversold has to stay correctable upwards
+        private async Task<BaseResponse> ValidateStockCoverage(Product product, Product previous, List<ProductVariant> previousVariants)
+        {
+            var rs = new BaseResponse();
+            var today = DateTime.UtcNow.Date;
+
+            if (product.Stock < previous.Stock)
+            {
+                var reserved = await _db
+                    .ProductOrder
+                    .Where(x => x.ProductId == product.Id && x.Order.Date >= today)
+                    .GroupBy(x => x.Order.Date.Date)
+                    .Select(x => new { Date = x.Key, Quantity = x.Sum(line => line.Quantity) })
+                    .ToListAsync();
+
+                var overbooked = reserved
+                    .Where(x => x.Quantity > product.Stock)
+                    .OrderBy(x => x.Date)
+                    .FirstOrDefault();
+
+                if (overbooked != null)
+                    return rs.SetError(Messages.Error.ProductStockBelowReserved(overbooked.Date, overbooked.Quantity));
+            }
+
+            var previousStock = previousVariants.ToDictionary(x => x.Id, x => x.Stock);
+            var reduced = LiveVariants(product)
+                .Where(x => previousStock.TryGetValue(x.Id, out var stock) && x.Stock < stock)
+                .ToDictionary(x => x.Id, x => x);
+
+            if (reduced.Count == 0)
+                return rs;
+
+            var variantIds = reduced.Keys.ToList();
+
+            var reservations = await _db
+                .ProductOrder
+                .Where(x => x.VariantId.HasValue && variantIds.Contains(x.VariantId.Value) && x.Order.Date >= today)
+                .GroupBy(x => new { VariantId = x.VariantId.Value, Date = x.Order.Date.Date })
+                .Select(x => new { x.Key.VariantId, x.Key.Date, Quantity = x.Sum(line => line.Quantity) })
+                .ToListAsync();
+
+            foreach (var reservation in reservations.OrderBy(x => x.Date).ThenBy(x => x.VariantId))
+            {
+                var variant = reduced[reservation.VariantId];
+
+                if (reservation.Quantity > variant.Stock)
+                    return rs.SetError(Messages.Error.VariantStockBelowReserved(variant.Description, reservation.Date, reservation.Quantity));
+            }
+
+            return rs;
+        }
+
         private static BaseResponse<T> ValidateVariants<T>(List<ProductVariant> variants)
         {
             var rs = new BaseResponse<T>();
@@ -784,12 +837,58 @@ namespace LaNata_Api.Core.Services
         #endregion
 
         #region Helpers
-        private async Task<RepriceResult> RepriceOpenOrders(
+        private List<ProductPriceHistory> BuildPriceHistory(
+            Product product,
+            Product previous,
+            List<ProductVariant> previousVariants,
+            RepriceSummary summary)
+        {
+            var entries = new List<ProductPriceHistory>();
+            var changedBy = _tokenService.TryGetToken()?.UserId;
+
+            ProductPriceHistory Entry(int? variantId, decimal? previousPriceExtra, decimal? newPriceExtra, RepriceResult result)
+            {
+                return new ProductPriceHistory
+                {
+                    ProductId = product.Id,
+                    VariantId = variantId,
+                    PreviousPrice = previous.Price,
+                    NewPrice = product.Price,
+                    PreviousBreakPrice = previous.BreakPrice,
+                    NewBreakPrice = product.BreakPrice,
+                    PreviousPriceExtra = previousPriceExtra,
+                    NewPriceExtra = newPriceExtra,
+                    ChangedBy = changedBy,
+                    RepricedOrders = result.Orders,
+                    RepricedLines = result.Lines,
+                    SkippedLines = result.Skipped
+                };
+            }
+
+            var previousSurcharges = previousVariants.ToDictionary(x => x.Id, x => x.PriceExtra);
+            var moved = LiveVariants(product)
+                .Where(x => previousSurcharges.TryGetValue(x.Id, out var previousPriceExtra) && previousPriceExtra != x.PriceExtra)
+                .ToList();
+
+            if (product.Price != previous.Price || product.BreakPrice != previous.BreakPrice)
+            {
+                // The variants that kept their surcharge moved too and have no row of their own
+                var ownRow = moved.Select(x => x.Id).ToHashSet();
+                entries.Add(Entry(null, null, null, summary.Fold(x => !ownRow.Contains(x))));
+            }
+
+            foreach (var variant in moved)
+                entries.Add(Entry(variant.Id, previousSurcharges[variant.Id], variant.PriceExtra, summary.For(variant.Id)));
+
+            return entries;
+        }
+
+        private async Task<RepriceSummary> RepriceOpenOrders(
             Product product,
             decimal previousPrice,
             List<ProductVariant> previousVariants)
         {
-            var result = new RepriceResult();
+            var summary = new RepriceSummary();
             var today = DateTime.UtcNow.Date;
 
             var previousSurcharges = previousVariants.ToDictionary(x => x.Id, x => x.PriceExtra ?? 0);
@@ -801,7 +900,7 @@ namespace LaNata_Api.Core.Services
                 newPrice = product.Price;
 
                 if (!variantId.HasValue)
-                    return newPrice > oldPrice;
+                    return newPrice != oldPrice;
 
                 if (!previousSurcharges.TryGetValue(variantId.Value, out var previousSurcharge)
                     || !currentSurcharges.TryGetValue(variantId.Value, out var currentSurcharge))
@@ -809,7 +908,7 @@ namespace LaNata_Api.Core.Services
 
                 oldPrice += previousSurcharge;
                 newPrice += currentSurcharge;
-                return newPrice > oldPrice;
+                return newPrice != oldPrice;
             }
 
             // Load every eligible line once. The exact old effective price check is done below with
@@ -822,7 +921,9 @@ namespace LaNata_Api.Core.Services
                 .ToListAsync();
 
             if (lines.Count == 0)
-                return result;
+                return summary;
+
+            var repriced = 0;
 
             // Grouped by order and variant
             foreach (var group in lines.GroupBy(x => new { x.OrderId, x.VariantId }))
@@ -834,6 +935,7 @@ namespace LaNata_Api.Core.Services
                 if (stale == null)
                     continue;
 
+                var result = summary.Track(group.Key.VariantId);
                 var target = group.FirstOrDefault(x => x.UnitPrice == targetPrice);
 
                 if (target != null)
@@ -857,25 +959,27 @@ namespace LaNata_Api.Core.Services
                 }
 
                 result.Lines++;
+                repriced++;
+
                 if (!result.OrderIds.Contains(group.Key.OrderId))
                     result.OrderIds.Add(group.Key.OrderId);
             }
 
-            if (result.Lines > 0)
+            if (repriced > 0)
                 await _db.SaveChangesAsync();
 
-            return result;
+            return summary;
         }
 
-        private static bool HasEffectivePriceIncrease(Product previous, Product current)
+        private static bool HasEffectivePriceChange(Product previous, Product current)
         {
-            if (current.Price > previous.Price)
+            if (current.Price != previous.Price)
                 return true;
 
             var previousSurcharges = LiveVariants(previous).ToDictionary(x => x.Id, x => x.PriceExtra ?? 0);
 
             return LiveVariants(current).Any(x => previousSurcharges.TryGetValue(x.Id, out var previousSurcharge)
-                && current.Price + (x.PriceExtra ?? 0) > previous.Price + previousSurcharge);
+                && current.Price + (x.PriceExtra ?? 0) != previous.Price + previousSurcharge);
         }
 
         private async Task<BaseResponse> ReconcileVariants(Product product, List<UpdateRequest.VariantItem> requested)
@@ -960,6 +1064,20 @@ namespace LaNata_Api.Core.Services
                 filters.Add(new ReportField("Categoría", categoryName));
 
             return filters;
+        }
+
+        private async Task<Dictionary<int, string>> LoadVariantNames(IEnumerable<int?> ids)
+        {
+            var wanted = ids.Where(x => x.HasValue).Select(x => x.Value).Distinct().ToList();
+            if (wanted.Count == 0)
+                return [];
+
+            return await _db
+                .ProductVariant
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .Where(x => wanted.Contains(x.Id))
+                .ToDictionaryAsync(x => x.Id, x => x.Description);
         }
 
         private async Task<Dictionary<int, string>> LoadCategoryNames(params int?[] ids)

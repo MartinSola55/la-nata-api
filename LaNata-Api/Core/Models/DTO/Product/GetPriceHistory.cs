@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 namespace LaNata_Api.Core.Models.DTO.Product
@@ -15,10 +15,14 @@ namespace LaNata_Api.Core.Models.DTO.Product
         public class Item
         {
             public int Id { get; set; }
+            public int? VariantId { get; set; }
+            public string VariantDescription { get; set; }
             public decimal PreviousPrice { get; set; }
             public decimal NewPrice { get; set; }
             public decimal? PreviousBreakPrice { get; set; }
             public decimal? NewBreakPrice { get; set; }
+            public decimal? PreviousPriceExtra { get; set; }
+            public decimal? NewPriceExtra { get; set; }
             public DateTime ChangedAt { get; set; }
             public string ChangedByEmail { get; set; }
             public int RepricedOrders { get; set; }

@@ -60,7 +60,7 @@ Migration `04` renamed every column to PascalCase and `Rol` to `Role`, so the C#
 | `Category` | `Category` | `Description`; groups the catalogue so the price list can be printed per rubro |
 | `Product` | `Product` | `Description`, `Stock`, `Price`, `BreakPrice`, `CategoryId` |
 | `ProductVariant` | `ProductVariant` | `ProductId`, `Description`, `Stock`, `PriceExtra` — a variant with its own stock |
-| `ProductPriceHistory` | `ProductPriceHistory` | append-only log of price changes and what each one did to the open orders |
+| `ProductPriceHistory` | `ProductPriceHistory` | append-only log of price changes, product and variant, and what each one did to the open orders |
 | `Order` | `Order` | `ClientName`, `Phone`, `EventAddress`, `Date`, `ShipmentPrice`, `Observation`, `PaidAt`, `PaidBy` |
 | `ProductOrder` | `ProductOrder` | order line; surrogate `Id`, unique on `(ProductId, OrderId, UnitPrice, VariantId)` |
 | `Expense` | `Expense` | `Date`, `Description`, `Price` |
@@ -113,6 +113,8 @@ Pass `excludeOrderId` while editing an order so its own reservation is not count
 
 `OrderService.GetReservations` resolves both dictionaries in **two round trips** whatever the order holds, and `BuildOrderProducts` applies the two ceilings in memory. Every write path re-checks availability server-side: creating an order, editing one, and moving an order to another date.
 
+The catalogue side is guarded too, because every availability check reads `Stock` forward: lowering it under what the upcoming events already book would cancel nothing and just leave those orders oversold. `Product/Update` refuses a reduction that an upcoming event day no longer fits, naming the day and the quantity, and checks the product before the variants. Only reductions are checked, so a row that is already oversold can still be corrected upwards. For the same reason `Product/Delete` refuses to retire a product that an upcoming event still books — a past order holding a retired product is fine, creating that situation for an order still ahead is not.
+
 ### One product can appear several times in an order
 
 `ProductOrder` has a surrogate `Id` primary key and a unique index on `(ProductId, OrderId, UnitPrice, VariantId)`. So the same product can be reserved twice at different prices — the price a client was quoted before a change, plus the current one — and also twice at the same price with different variants.
@@ -123,11 +125,13 @@ The whole line set travels in one call: `Order/Create` and `Order/Update`. `Upda
 
 Deleting an order only stamps `deleted_at` on the order itself. Its lines stay, and the stock they reserved is released anyway because every availability query reaches them through `Order`.
 
-### Raising a price follows through to the open orders
+### Moving a price follows through to the open orders
 
-Raising a product's price re-prices the lines of orders that are **not paid** and whose **event has not happened**. A paid order and a past event stay frozen at what was agreed, and a line at any other price is a quote somebody chose to hold.
+Moving a product's price — **up or down** — re-prices the lines of orders that are **not paid** and whose **event has not happened**. A paid order and a past event stay frozen at what was agreed, and a line at any other price is a quote somebody chose to hold. A variant moves with its own surcharge: what its lines were quoted at is `Price + PriceExtra`, and either half moving is enough.
 
-It all happens inside `Product/Update`, in one transaction with the product save and the `ProductPriceHistory` row, so the log can never claim a re-pricing that rolled back. When the order already holds a line at the target price the two are merged with their quantities summed; over the quantity cap both are left untouched and counted as skipped.
+It all happens inside `Product/Update`, in one transaction with the product save and the `ProductPriceHistory` rows, so the log can never claim a re-pricing that rolled back. When the order already holds a line at the target price the two are merged with their quantities summed; over the quantity cap both are left untouched and counted as skipped.
+
+Every movement leaves a log row: one for the product when its price or break price changed, plus one per variant whose surcharge changed. A variant row carries `VariantId` and its own surcharge on both sides, which is what the screen shows for it; the product price of the moment rides along so the effective price stays reconstructible. Each row reports only the lines its own change re-priced.
 
 `GET /api/Product/GetPriceHistory?id=1` returns every change with how many orders and lines it moved.
 
@@ -175,7 +179,7 @@ POST /api/Order/Create                  Header + line list in one call
 POST /api/Order/Update                  Header + the whole line set, reconciled
 POST /api/Order/Delete
 POST /api/Order/GetDates                Days holding orders, for the calendar
-POST /api/Order/MarkAsPaid              Freezes the order against price rises
+POST /api/Order/MarkAsPaid              Freezes the order against price changes
 POST /api/Order/MarkAsUnpaid
 POST /api/Order/Report                  PDF detail, with or without prices
 POST /api/Order/Budget                  PDF quote for an order not yet created
@@ -332,6 +336,7 @@ LaNata-Api/Core/DAL/Migrations
   08_Order_Payment_And_Price_History.sql      Order.PaidAt/PaidBy and ProductPriceHistory
   09_Product_Variants.sql                     ProductVariant and the ProductOrder key rebuild
   10_Drop_Numeric_Check_Constraints.sql       Numeric bounds move out of the database into the API
+  11_Price_History_Variants.sql               ProductPriceHistory rows for a variant surcharge change
 ```
 
 Scripts are executed in filename order. Each executed filename is stored in `_Migrations`, so each script runs once. New scripts keep the numeric prefix (`10_Add_New_Feature.sql`).
@@ -413,7 +418,7 @@ Builder methods:
 | `AddLookup(x => x.RoleId, resolver, "Rol")` | Foreign keys and codes; the resolver returns the text the user should read. |
 | `AddCollection<TItem>(x => x.Items, x => x.Id, x => x.Name, "Productos")` | Collections; reports items added and removed, compared by key. |
 
-Order lines are not diffed through the change list either: `BuildUpdateAuditChanges` stores the full before/after line snapshots — product, variant, quantity, unit price and subtotal — in `State` and `Payload`, plus one synthetic change entry, which reads better than a collection diff. `HaveSameProductLines` compares `(ProductId, Quantity, UnitPrice, VariantId)`; dropping `VariantId` there would make a variant swap vanish from the trail.
+Order lines are not diffed through the change list either: creation stores the complete initial line snapshot in `Payload`, while `BuildUpdateAuditChanges` stores the full before/after line snapshots — product, variant, quantity, unit price and subtotal — in `State` and `Payload`, plus one synthetic change entry, which reads better than a collection diff. `HaveSameProductLines` compares `(ProductId, Quantity, UnitPrice, VariantId)`; dropping `VariantId` there would make a variant swap vanish from the trail.
 
 A product update writes a single `UPDATED` entry containing the product fields, variant changes and, when applicable, the affected order ids and re-priced line counts under `Payload.Repricing`.
 

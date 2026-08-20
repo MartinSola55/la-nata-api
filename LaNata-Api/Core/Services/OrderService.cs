@@ -137,7 +137,7 @@ namespace LaNata_Api.Core.Services
                 return rs.SetError(Messages.Error.Exception());
             }
 
-            await Audit(AuditActionCode.CREATED, order, BuildAuditChanges(AuditChangeList.ForCreated(order)));
+            await Audit(AuditActionCode.CREATED, order, BuildCreateAuditChanges(order));
 
             rs.Message = Messages.CRUD.EntityCreated("Pedido");
             rs.Data = new CreateResponse
@@ -494,6 +494,25 @@ namespace LaNata_Api.Core.Services
                 .AddField(x => x.Observation, "Observación")
                 .AddField(x => x.PaidAt, "Cobro", AuditFormat.Date)
                 .Build();
+        }
+
+        private static AuditChangeSet BuildCreateAuditChanges(Order order)
+        {
+            var changes = BuildAuditChanges(AuditChangeList.ForCreated(order));
+            var lines = order.Products ?? [];
+            var products = lines
+                .Where(x => x.Product != null)
+                .Select(x => x.Product)
+                .DistinctBy(x => x.Id)
+                .ToDictionary(x => x.Id);
+            var variants = lines
+                .Where(x => x.Variant != null)
+                .Select(x => x.Variant)
+                .DistinctBy(x => x.Id)
+                .ToDictionary(x => x.Id);
+
+            changes.Payload[nameof(Order.Products)] = BuildProductAuditSnapshot(lines, products, variants);
+            return changes;
         }
 
         private static AuditChangeSet BuildUpdateAuditChanges(

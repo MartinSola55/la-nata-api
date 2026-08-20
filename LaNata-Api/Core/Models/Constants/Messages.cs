@@ -1,3 +1,4 @@
+﻿using System;
 using System.Globalization;
 
 namespace LaNata_Api.Core.Models.Constants
@@ -83,6 +84,21 @@ namespace LaNata_Api.Core.Models.Constants
                 return "No se puede eliminar la categoría porque tiene productos asociados.";
             }
 
+            public static string ProductInUse()
+            {
+                return "No se puede eliminar el producto porque está reservado en pedidos futuros.";
+            }
+
+            public static string ProductStockBelowReserved(DateTime date, int reserved)
+            {
+                return "No se puede reducir el stock: el " + Day(date) + " hay " + ReservedUnits(reserved) + ".";
+            }
+
+            public static string VariantStockBelowReserved(string variantName, DateTime date, int reserved)
+            {
+                return "No se puede reducir el stock de la variante \"" + variantName + "\": el " + Day(date) + " hay " + ReservedUnits(reserved) + ".";
+            }
+
             public static string VariantWithoutStock(string variantName)
             {
                 return "La variante \"" + variantName + "\" no cuenta con suficiente stock.";
@@ -151,6 +167,16 @@ namespace LaNata_Api.Core.Models.Constants
             public static string UserWithoutRole()
             {
                 return "El usuario con el que intentas acceder no posee un rol.";
+            }
+
+            private static string Day(DateTime date)
+            {
+                return date.ToString("dd/MM/yyyy", CultureInfo.InvariantCulture);
+            }
+
+            private static string ReservedUnits(int quantity)
+            {
+                return quantity + (quantity == 1 ? " unidad reservada" : " unidades reservadas");
             }
         }
 
