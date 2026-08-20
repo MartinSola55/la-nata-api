@@ -22,6 +22,7 @@ namespace LaNata_Api.Core.Services
             services.AddScoped<UserService>();
 
             // Business
+            services.AddScoped<CategoryService>();
             services.AddScoped<ProductService>();
             services.AddScoped<OrderService>();
             services.AddScoped<ExpenseService>();

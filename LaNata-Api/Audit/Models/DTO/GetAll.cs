@@ -4,7 +4,7 @@ using LaNata_Api.Core.Models.DTO;
 
 namespace LaNata_Api.Audit.Models.DTO
 {
-    public class GetAllRequest : PaginateRequest
+    public class GetAllRequest : SortRequest
     {
         public DateTime? DateFrom { get; set; }
         public DateTime? DateTo { get; set; }

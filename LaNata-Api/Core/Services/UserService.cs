@@ -82,7 +82,7 @@ namespace LaNata_Api.Core.Services
         {
             rq ??= new GetAllRequest();
 
-            var validationError = ServiceRequestValidator.ValidatePagination(rq);
+            var validationError = ServiceRequestValidator.ValidateSort(rq);
             if (validationError != null)
                 return new BaseResponse<GetAllResponse>().SetError(validationError);
 
@@ -107,8 +107,6 @@ namespace LaNata_Api.Core.Services
                             CreatedAt = x.CreatedAt,
                             Role = x.Role.Name
                         })
-                        .Skip((rq.Page - 1) * Pagination.DefaultPageSize)
-                        .Take(Pagination.DefaultPageSize)
                         .ToListAsync()
                 }
             };

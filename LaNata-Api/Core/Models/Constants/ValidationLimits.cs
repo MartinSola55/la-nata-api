@@ -2,7 +2,11 @@ namespace LaNata_Api.Core.Models.Constants
 {
     public static class ValidationLimits
     {
+        public const int CategoryDescriptionMaxLength = 100;
+
         public const int ProductDescriptionMaxLength = 255;
+        public const int ProductVariantDescriptionMaxLength = 100;
+        public const int ProductVariantsMax = 20;
         public const int ProductStockMax = 1000000;
         public const decimal ProductPriceMax = 1000000000;
 

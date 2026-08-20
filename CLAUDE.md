@@ -25,7 +25,7 @@ Guidance for future work in this repository.
 - Current libraries:
   - `Core` — the business itself (products, orders, expenses, dashboard) plus users, roles, auth, the `APIContext`, security config, and shared DTOs/constants.
   - `Audit` — audit trail: `AuditableEntity`, `AuditInterceptor` and the `audit` schema.
-  - `Export` — CSV and XLSX generation.
+  - `Export` — XLSX generation.
   - `Report` — PDF generation.
 - Every library repeats the same inner layout, and only creates the folders it actually needs:
 
@@ -146,7 +146,7 @@ namespace LaNata_Api.Core.Services
 
 ## Auth And Roles
 
-- Use custom `User` and `Role` entities. `Role` maps the legacy `Rol` table.
+- Use custom `User` and `Role` entities. The table was renamed from `Rol` to `Role` by migration `04`.
 - Do not switch to ASP.NET Identity unless explicitly requested.
 - **The `User` table has no name columns** — only `email`, `password` and `id_rol`. The email is the only human-readable identity anywhere: in the token, in the audit trail and in report authorship. Do not add `Name`/`LastName` back without the columns to store them.
 - Passwords are hashed with `BCrypt.Net-Next`, and only BCrypt is accepted. The legacy unsalted SHA-256 hashes cannot be verified, so a carried-over user has to have their hash written once before they can log in — `dotnet run -- --hash "..."` prints one.
@@ -163,7 +163,7 @@ namespace LaNata_Api.Core.Services
 - Role values live in `Core/Models/Constants/Roles.cs`.
 - Policy names live in `Core/Models/Constants/Policies.cs`.
 - Configure policies with `RequireRole`.
-- Current roles, matching the text already in the `Rol` table:
+- Current roles, matching the text already in the `Role` table:
   - `Administrador`
   - `Empleado`
 
@@ -185,7 +185,7 @@ namespace LaNata_Api.Core.Services
   - `GetAllResponse`
 - `GetAllResponse` contains an `Items` list with nested `Item` classes.
 - Sorting uses `SortRequest` (`ColumnSort` + `SortDirection`) from `Core/Models/DTO/Sort.cs`. `ColumnSort` has **no default**: each service's `OrderQuery` owns the natural order of its listing through the `_ =>` branch, which is what keeps a listing sorted the way the legacy screen showed it.
-- `PaginateRequest` extends `SortRequest` with `Page`, and page size comes from `Pagination.DefaultPageSize`.
+- There is no paginated request type. Every listing request extends `SortRequest` and nothing else.
 
 ## Generic CRUD Pattern
 
@@ -201,14 +201,9 @@ namespace LaNata_Api.Core.Services
 - Use soft delete by setting `DeletedAt = DateTime.UtcNow`.
 - Set `UpdatedAt = DateTime.UtcNow` on updates.
 - Use `AsNoTracking()` on read-only single-item projections.
-- Apply filtering before ordering and pagination.
-- **Do not apply pagination.** The business listings (products, orders, expenses) return the whole filtered set, matching the legacy screens, and extend `SortRequest`. Only the listings that already page — users and the audit trail — extend `PaginateRequest`.
-- If pagination is ever requested for a listing, switch its request to `PaginateRequest` and use:
-
-```csharp
-.Skip((rq.Page - 1) * Pagination.DefaultPageSize)
-.Take(Pagination.DefaultPageSize)
-```
+- Apply filtering before ordering.
+- **No listing paginates. Never add `.Skip()` / `.Take()` to one.** Every `GetAll` returns the whole filtered set, the way the legacy screens showed it, and the client renders all of it. Users and the audit trail used to page and no longer do.
+- Growth is bounded by **filters**, not by a page size: the audit trail is the only table that grows without an upper limit, and its screen defaults to the current month for exactly that reason. If a listing ever gets slow, tighten its default filter rather than reintroducing paging.
 
 ## Models And Data
 
@@ -220,11 +215,13 @@ namespace LaNata_Api.Core.Services
   - `Models/Constants/` — reusable constants.
   - `Models/Internal/` — everything else.
 - `Export/` and `Report/` own no tables, so their `Models/` root is empty by design. Do not add table-less classes back into it to make it look populated.
-- Current tables: `Rol`, `User`, `Product`, `Order`, `ProductOrder`, `Expense`, `_Migrations`, plus the three in the `audit` schema.
-- **Every entity carries explicit `[Table]` and `[Column]` attributes.** The database uses snake_case columns, Spanish table names (`Rol`) and one legacy typo (`Order.event_adress`); the C# side stays readable and the attribute is what bridges them. Never rely on EF conventions to guess a name here.
-- **Money is `double`, not `decimal`.** Every price column is `float` in the production schema. `decimal` over `float` rounds silently on every write. This is the one place the code follows the database instead of good practice; fixing it means a column type migration nobody has authorised.
-- Soft-deletable entities inherit from `AuditableEntity`, whose own properties carry `[Column]` attributes for the snake_case names.
-- `ProductOrder` is the exception: it is a join table keyed by `(id_product, id_order, unit_price)` with no `deleted_at`, so it does **not** inherit `AuditableEntity` and the app hard deletes from it.
+- Current tables: `Role`, `User`, `Category`, `Product`, `ProductVariant`, `ProductPriceHistory`, `Order`, `ProductOrder`, `Expense`, `_Migrations`, plus the three in the `audit` schema.
+- **Entities carry `[Table]` but no `[Column]`.** Migration `04_Rename_Columns_To_Model_Names.sql` renamed every column to PascalCase and `Rol` to `Role`, including the legacy typo `event_adress` → `EventAddress`, so EF conventions now match the database. Do not add `[Column]` attributes back, and do not assume snake_case anywhere.
+- **Money is `decimal` with `[Precision(18, 2)]` on the property.** Migration `05` converted the old `float` columns to `DECIMAL(18, 2)`; do not go back to `double`.
+- Soft-deletable entities inherit from `AuditableEntity`.
+- Two entities deliberately do not:
+  - `ProductOrder`, an order line with no `deleted_at`, which the app hard deletes from.
+  - `ProductPriceHistory`, an append-only log that is never edited or removed.
 - `AuditableEntity` has:
   - `CreatedAt`
   - `UpdatedAt`
@@ -234,44 +231,60 @@ namespace LaNata_Api.Core.Services
 - The `*At` / `*By` audit columns are written by `AuditInterceptor`, not by services.
 - Use query filters in `APIContext` for soft-deleted entities.
 - Entity `DbSet` names are singular, matching the reference style:
+  - `Category`
   - `Product`
+  - `ProductVariant`
   - `Order`
   - `ProductOrder`
   - `Expense`
 - Use `[Key]` and `[ForeignKey]` attributes where the current style does.
-- Money columns are `decimal` with `HasPrecision(18, 2)` configured in `APIContext`. The legacy used `float`; do not go back to it.
 - Always use `DateTime.UtcNow` dates for DateTime properties.
 
 ## Domain Rules
 
 These are the rules the legacy app enforced. Keep them when touching products or orders.
 
-### Stock is per event date
+### Stock is per event date, and there are two ceilings
 
 - `Product.Stock` is the size of the catalogue, not what is free. Availability for a date is `Stock` minus everything the non-deleted orders of that same date reserve.
-- `OrderService.GetAvailableStock(product, date, excludeOrderId)` is the single implementation. `excludeOrderId` leaves the order being edited out of the count so its own reservation is not read as somebody else's.
-- Re-check availability on every write path: creating an order, adding a product to one, and moving an order to another date.
-- `ProductService.GetStock` exposes the same calculation to the client. The legacy passed the available stock back from the browser as a query parameter and trusted it; never do that — the check belongs on the server.
+- **A variant has its own stock, and a line that picks one consumes both.** 100 chairs with 80 white covers means 80 lines can take the white cover and the remaining 20 must take another variant or none — never 101 chairs, never 81 white covers.
+- `OrderService.GetReservations(productIds, variantIds, date, excludeOrderId)` is the single implementation. It answers in **two round trips whatever the order holds**, not one query per product, and `excludeOrderId` leaves the order being edited out of the count so its own reservation is not read as somebody else's. `BuildOrderProducts` then applies both ceilings in memory: the product one sums every line of it whatever variant they picked, the variant one only the lines on that variant.
+- Re-check availability on every write path: creating an order, editing one, and moving an order to another date.
+- `ProductService.GetStock` exposes the same calculation to the client, product and variants together. The legacy passed the available stock back from the browser as a query parameter and trusted it; never do that — the check belongs on the server.
 
-### Order lines are keyed by price
+### Order lines are keyed by product, price and variant
 
-- `ProductOrder`'s primary key is `(id_product, id_order, unit_price)`, so one order can hold the same product twice at different prices — the price a client was quoted before a change, plus the current one.
-- `AddProduct` without `unitPrice` merges into (or opens) the line at the current catalogue price; with `unitPrice` it targets the line at that price.
-- `RemoveProduct` takes the price as well: removing the whole reserved quantity **hard deletes** the row, anything less subtracts. There is no `deleted_at` on this table to soft delete into.
+- `ProductOrder` has a surrogate `Id` primary key plus a **unique index** on `(ProductId, OrderId, UnitPrice, VariantId)`. So one order can hold the same product twice at different prices — the price a client was quoted before a change, plus the current one — and also twice at the same price with different variants.
+- `VariantId` is nullable, which is why it could not stay in a composite primary key: migration `09` rebuilt the key precisely for this. SQL Server treats NULLs as **equal** inside a unique index, and that is what still limits an order to one "sin variante" line per product and price. Do not "fix" that into a filtered index.
+- There is a single write path: `Order.Create` and `Order.Update` take the whole line set. `Update` reconciles by `(ProductId, UnitPrice, VariantId)` — quantity-patched when matched, hard deleted when not, inserted for the leftovers.
+- `BuildOrderProducts` resolves the unit price as `product.Price + (variant.PriceExtra ?? 0)` unless the caller supplies one explicitly (`Update` does, `Create` does not).
 - Deleting an order only stamps `deleted_at` on the order. The lines stay, and the stock they reserved is released anyway because every availability query reaches them through `Order`, which carries the soft-delete filter.
+
+### Raising a price follows through to the open orders
+
+- `ProductService.RepriceOpenOrders` runs inside `Product.Update`, in the same transaction as the product save and the `ProductPriceHistory` row, so the log can never claim a re-pricing that rolled back.
+- It only fires when the line's effective price **rises**, and only touches lines whose order is not deleted, **not paid** (`Order.PaidAt == null`) and whose **event has not happened** (`Order.Date >= today`). A line at any other price is a quote somebody chose to hold and is left frozen.
+- A variant line was quoted at `previousPrice + previousPriceExtra` and moves to `newPrice + newPriceExtra`. Both surcharge versions must be kept while the update runs; using the already-updated surcharge to identify the old line leaves it behind. Grouping and collision handling are by `(OrderId, VariantId)`.
+- **Collisions merge**: when the order already holds a line at the target price, the quantities are summed and the stale row is hard deleted. Over `ValidationLimits.OrderQuantityMax` both rows are left untouched and `SkippedLines` is incremented — half a merge would lose quantity with the row it deletes.
+- `ProductOrder` has no `deleted_at`, so this rewrites rows with no undo. The predicate is the whole safety of the operation; rehearse any change to it against a restored copy.
+
+### Payment state freezes an order
+
+- `Order.PaidAt` / `PaidBy` are written by `OrderService.MarkAsPaid` / `MarkAsUnpaid`, not by `AuditInterceptor`, which only stamps `AuditableEntity` columns.
+- A paid order stays **editable** on purpose: fixing a typo should not require cancelling the charge.
+- The balance reports `TotalIncome` (billed, unchanged in meaning) alongside `TotalIncomePaid` (collected). Profit still measures against the billed figure.
 
 ### A deleted product still belongs to its old orders
 
 - 40 of the 274 products are soft deleted, and 170 lines across 164 orders point at them.
 - The global soft-delete filter turns `Include(x => x.Products).ThenInclude(x => x.Product)` into a join that **silently drops those lines**, under-reporting the line count and the order total. This is not hypothetical — it was a live bug caught against production data.
-- `OrderService.LoadLineProducts` resolves an order's products with `IgnoreQueryFilters()`. Anything that reads the products behind order lines must go through it: `GetOne`, `Report`, `RemoveProduct` and `ValidateDateChange` all do.
+- `OrderService.LoadLineProducts` resolves an order's products with `IgnoreQueryFilters()`, and `LoadLineVariants` does the same for variants. Anything that reads the products or variants behind order lines must go through them: `GetOne`, `Report` and the audit snapshot in `Update` all do. `BuildOrderProducts` loads the requested variants the same way, or re-saving an order that books a retired variant would be impossible.
 - The rule generalises: **never navigate from a historical row to a soft-deletable master through an unfiltered `Include`.** Reading forward (from `Product` to its orders, or from `Order` to its lines) is fine and is exactly how the stock calculation excludes cancelled orders.
 
 ### Text normalization
 
-- `Core/Helpers/TextHelper.cs` owns it, one method per legacy rule: `ToTitleCase` (client names), `ToUpperFirst` (descriptions, addresses, observations), `ToNumber` (phones).
-- It strips anything outside letters/digits/spaces/apostrophes, exactly as the legacy regexes did, and uses the invariant culture because the stored text is compared and printed.
-- Apply it in the service when building the entity, never in the controller.
+- There is **no** `TextHelper`. Services trim the incoming strings when building the entity (`rq.Description?.Trim()`) and nothing else.
+- If the legacy casing rules (title case for client names, upper-first for descriptions) are ever wanted back, add the helper under `Core/Helpers/` and apply it in the service, never in the controller.
 
 ### Dates carry a time component
 
@@ -295,6 +308,11 @@ These are the rules the legacy app enforced. Keep them when touching products or
 - Prefer static classes for constants.
 - Do not hard-code repeated status strings in services.
 - Company details printed on reports live in `Core/Models/Constants/CompanyInfo.cs`.
+- **Numeric bounds live in `ValidationLimits` and in the web, never in the database.** Migration `10_Drop_Numeric_Check_Constraints.sql` removed every numeric `CHECK`, so a new migration must not add one back. The reason is inflation: a ceiling in pesos ages, and moving one that lives in a constraint costs a drop-and-recreate against the live database, a rehearsal and a window — for what is really a typo guard. In code it is a one-line edit and a deploy.
+- The two remaining places must carry the same number: `ValidationLimits` and the matching `*_MAX` constant in the web. The web clamps the input, the API rejects whatever still gets through.
+- **Keep the money bounds generous.** They exist to catch a slipped keystroke, not to express what La Ñata charges — nothing in four years of real data comes within two orders of magnitude of any of them. Tightening one to today's prices is how it ends up needing a change every couple of years.
+- Length constraints stay in the database: a column width is not affected by inflation and it backstops the `NVARCHAR` size. Add those in the same migration that creates the column, matching the `*MaxLength` constant.
+- What was given up by dropping the numeric constraints is the **floor**, not the ceiling: those constraints combined `> 0` with `<= max`, and the `> 0` half is what kept a negative amount out of a column. A floor never ages, so if it is ever wanted back it belongs in a constraint of its own with no upper bound — that one would never need another migration.
 
 ## User-Facing Messages
 
@@ -313,11 +331,20 @@ return entityName + " cread" + (femine ? "a" : "o") + " correctamente.";
 - Keep all migrations as SQL scripts.
 - Do not add EF generated migration `.cs` files.
 - All SQL scripts live in `LaNata-Api/Core/DAL/Migrations/`, regardless of which library owns the tables they touch. Do not add a `DAL/Migrations` folder to the other libraries.
-- Migration names are ordered with numeric prefixes:
-  - `01_Audit_Columns.sql`
-  - `02_Audit_Schema.sql`
-  - `03_Add_New_Feature.sql`
+- Migration names are ordered with numeric prefixes. The current sequence:
+  - `01_Audit_Columns.sql` — audit columns and their FKs on `User`, `Product`, `Order`, `Expense`
+  - `02_Audit_Schema.sql` — the `audit` schema, its three tables, and the lookup seeds
+  - `03_Product_BreakPrice_Nullable.sql`
+  - `04_Rename_Columns_To_Model_Names.sql` — snake_case → PascalCase, `Rol` → `Role`
+  - `05_Data_Types_And_Validation_Constraints.sql` — `float` → `DECIMAL(18,2)`, CHECK constraints, first `PK_ProductOrder` rebuild
+  - `06_Remove_Order_Product_Audit_Actions.sql`
+  - `07_Category.sql` — the `Category` table and `Product.CategoryId`
+  - `08_Order_Payment_And_Price_History.sql` — `Order.PaidAt`/`PaidBy`, `ProductPriceHistory`, three audit action seeds
+  - `09_Product_Variants.sql` — `ProductVariant`, `ProductOrder.VariantId`, and the surrogate-key rebuild
+  - `10_Drop_Numeric_Check_Constraints.sql` — removes every numeric `CHECK`; the bounds move to `ValidationLimits` alone
 - **Migrations run against the live database, so every statement must be additive and idempotent.** Guard each one with `IF COL_LENGTH(...) IS NULL` or `IF NOT EXISTS`, so a rerun is a no-op. No `ALTER COLUMN`, no `DROP`, no rename, no `UPDATE` of existing rows.
+- Migrations `04`, `05`, `09` and `10` break that rule on purpose, each after weighing the alternative. `10` is the cheap kind: a `CHECK` is metadata, so dropping one rewrites no data, takes only a brief schema lock, and can never invalidate an existing row. `09` is the one to be careful with: it rebuilds `PK_ProductOrder` on a table holding every order line ever written. If a change ever looks like it needs the same, raise it rather than writing it, and when it does go ahead: full backup, rehearsal on a restored copy, and preferably a manual run in a maintenance window with `Database:RunSqlMigrations` set to `false`.
+- **`MigrationRunner` sends each file as a single batch** (`ExecuteSqlRawAsync`, no `GO`), and T-SQL resolves column names of an already existing table at compile time. A statement that names a column added earlier **in the same file** fails with "Invalid column name" and rolls the whole file back. Wrap those in `EXEC sys.sp_executesql N'...'` — `05`, `07`, `08` and `09` all do.
 - Rehearse anything non-trivial against a restored copy before it reaches `master`.
 - SQL scripts are copied to output through the `.csproj` content rule.
 - The `MigrationRunner` runs pending SQL scripts at startup when `Database:RunSqlMigrations` is `true`.
@@ -326,6 +353,13 @@ return entityName + " cread" + (femine ? "a" : "o") + " correctamente.";
 - Use `_Migrations` to prevent rerunning scripts.
 - Do not use `Database.Migrate()` for this project.
 - Do not use EF migrations unless explicitly requested.
+
+### One-off maintenance scripts
+
+- `Core/DAL/Scripts/` holds SQL that must **not** run automatically: anything that `UPDATE`s existing business rows. `MigrationRunner` only reads `Core/DAL/Migrations/`, so a file here never fires on a deploy, and the `.csproj` does not copy it to the output either — it is run by a person, from the repo, against a database they just backed up.
+- That is the line between the two folders: a migration changes the **shape** of the database and every environment needs it; a script changes **data** once, deliberately, and is a judgement call somebody has to make.
+- Write them idempotent anyway, so a second run is a no-op, and have them `PRINT` the counts before and after. `Product_BreakPrice_Zero_To_Null.sql` is the reference.
+- The exception already in the tree is `06_Remove_Order_Product_Audit_Actions.sql`, which does `UPDATE` audit rows inside a migration. That was allowed because the rows had to move before a foreign key could hold; do not read it as licence for data fixes in general.
 - **The API points at the live `LaNata` database**, the same one the legacy app uses. Back it up before running a new migration for the first time.
 
 ## Interceptors
@@ -361,6 +395,7 @@ The `Audit` library has two independent halves. Do not mix them up.
 - `AuditService.Audit` never throws: it validates the request, returns a `BaseResponse` error on failure, and must not be allowed to break the operation that triggered it.
 - The write uses its own `APIContext` built from the injected `DbContextOptions<APIContext>`, so calling `Audit(...)` never flushes the caller's pending changes. The flip side is that it commits on its own connection: an audit entry written inside a transaction that later rolls back still persists. Call `Audit(...)` after the business `SaveChangesAsync`.
 - Adding an action code means adding the constant in `AuditActionCode` **and** seeding the row in a SQL migration — `AuditEntry.ActionCode` has a foreign key to `audit.AuditAction`. Entity codes in `AuditEntityCode` are free strings and need no migration.
+- Current action codes: `CREATED`, `UPDATED`, `DELETED`, `ORDER_PAID`, `ORDER_UNPAID`, `LOGIN`, `LOGIN_FAILED`, `PASSWORD_CHANGED`, `EXPORTED`, `REPORT_GENERATED`.
 - `audit.AuditEntry.UserId` is deliberately **not** a foreign key to `dbo.User`, so audit history survives user deletion and audit writes never take locks on operational tables. `UserName` / `UserEmail` are denormalized copies taken from the token.
 
 ### Building the change summary
@@ -369,7 +404,9 @@ The `Audit` library has two independent halves. Do not mix them up.
 - `AddField` for scalars, `AddLookup` when the stored value is a code or foreign key and the resolver supplies the readable text, `AddCollection` to report added/removed items by key.
 - `Build()` returns an `AuditChangeSet` carrying `Changes` (the diff, with Spanish descriptions), `State` (before snapshot) and `Payload` (after snapshot). Snapshots only contain registered fields — this is what keeps secrets and irrelevant columns out of the audit table.
 - Follow the shape in `Core/Services/ProductService.cs`: an `#region Audit` with one private method declaring the audited fields, reused by create, update and delete, plus `entity.Clone()` before mutation so the update has something to compare against.
-- Order lines are the deliberate exception: `AddProduct` and `RemoveProduct` write their own `PRODUCT_ADDED` / `PRODUCT_REMOVED` entries with an explicit `Payload` (product, quantity, unit price), which reads better than a collection diff on the order.
+- Order lines are the deliberate exception: `BuildUpdateAuditChanges` stores full before/after line snapshots (product, variant, quantity, unit price, subtotal) in `State` / `Payload` and adds one synthetic change entry, rather than a collection diff. `HaveSameProductLines` compares `(ProductId, Quantity, UnitPrice, VariantId)` — dropping `VariantId` there would make a variant swap vanish from the trail.
+- Product variants are the other exception, for the same reason: they are rows of their own table. `ProductService.AddVariantAudit` snapshots both sides into `State` / `Payload` under `Variants` and adds one change entry per variant added, removed or edited, keyed on the variant id and carrying the whole variant before and after. `Update` has to take the before snapshot right after `entity.Clone()` and before `ReconcileVariants`, which edits the tracked variants in place; `Delete` includes them, since nothing lazy-loads. A removed variant stays in `Product.Variants` with `DeletedAt` set, so both sides are filtered through `LiveVariants`.
+- A product update always writes one `UPDATED` entry. That entry combines the product fields, variant changes and, under `Payload.Repricing`, the re-priced line counts and affected order ids (capped), rather than writing a second entry for the price propagation.
 - Audit text lives in `Audit/Models/Constants/AuditMessages.cs`, not in the shared `Messages` catalog, so the library stays self-contained.
 - `AuditFormatter` renders values with the invariant culture on purpose: the text is stored and compared, so it must not depend on the host's culture.
 
@@ -377,14 +414,13 @@ The `Audit` library has two independent halves. Do not mix them up.
 
 Both libraries follow the audit rule: nothing is included implicitly, the calling service declares its columns.
 
-### Export — CSV and XLSX
+### Export — XLSX
 
 - `ExportService` takes an in-memory collection and returns an `ExportFile` (name, content type, bytes). It never writes to disk; the caller decides what to do with the bytes.
 - Declare columns with `ExportColumns.For<T>()`, then `.Add(x => x.Field, "Encabezado", ExportValueFormat.Currency)`. `AddIf` skips a column for roles that must not see it.
-- `ExportValueFormat` drives both outputs: in CSV it picks the text, in XLSX it also picks the **cell type**, so numbers and dates stay sortable in the spreadsheet instead of arriving as text. Use `Text` for codes that must keep leading zeros — phone numbers use it.
-- CSV is written as UTF-8 **with BOM** — without it Excel falls back to the system codepage and mangles accents. The default delimiter is `;`, which is what Excel expects in Spanish locales.
-- CSV values starting with `=`, `+`, `-` or `@` are prefixed with a quote. This is a CSV-injection guard: without it, exported user input runs as a formula when the file is opened. Do not remove it.
-- `ToExcelWorkbook` builds multi-sheet workbooks. CSV has no equivalent.
+- `ExportValueFormat` picks the **cell type**, so numbers and dates stay sortable in the spreadsheet instead of arriving as text. Use `Text` for codes that must keep leading zeros — phone numbers use it.
+- `ToExcelWorkbook` builds multi-sheet workbooks.
+- There is no CSV writer: `ExportFileFormat` has a single member, `Excel`. If CSV is ever wanted back, it needs a UTF-8 BOM so Excel does not mangle accents, `;` as the delimiter for Spanish locales, and a quote prefix on values starting with `=`, `+`, `-` or `@` so exported user input cannot run as a formula.
 - Exports are capped at `ExportLimits.MaxRows`; past that the request is rejected instead of building a huge file in memory.
 
 ### Report — PDF
@@ -409,7 +445,7 @@ Both libraries follow the audit rule: nothing is included implicitly, the callin
 ### Auditing a generated file
 
 - Every successful export or report is audited: knowing who took which data out of the system is the point of having an audit trail.
-- Use `AuditActionCode.EXPORTED` for CSV/XLSX and `AuditActionCode.REPORT_GENERATED` for PDF. Both live in the `DOCUMENT` category.
+- Use `AuditActionCode.EXPORTED` for XLSX and `AuditActionCode.REPORT_GENERATED` for PDF. Both live in the `DOCUMENT` category.
 - A file has no before/after to diff, so leave `Changes` empty and put the facts in `Payload`: file name, format, row count and the applied filters. `EntityKey` stays null because the entry covers a set, not one record. See `ProductService.AuditDocument`.
 - Audit after the file is generated and only when it succeeded, so a failed generation leaves no misleading entry.
 

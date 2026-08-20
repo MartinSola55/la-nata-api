@@ -21,8 +21,8 @@ namespace LaNata_Api.Core.Helpers.Documents
             {
                 ComposeIntro(column);
 
-                ComposeSection(column, "GASTOS", BuildExpenseColumns(), _data.Expenses, _data.TotalExpenses, isFirst: true);
                 ComposeSection(column, "INGRESOS", BuildIncomeColumns(), _data.Income, _data.TotalIncome, isFirst: false);
+                ComposeSection(column, "GASTOS", BuildExpenseColumns(), _data.Expenses, _data.TotalExpenses, isFirst: true);
             });
         }
 
@@ -66,6 +66,7 @@ namespace LaNata_Api.Core.Helpers.Documents
                 .AddDate(x => x.Date, "Fecha")
                 .Add(x => x.ShipmentPrice.HasValue ? Currency(x.ShipmentPrice.Value) : "-", "Flete", ReportAlignment.Right)
                 .AddCurrency(x => x.Total, "Monto")
+                .Add(x => x.PaidAt.HasValue ? "Cobrado" : "Pendiente", "Cobro", ReportAlignment.Center)
                 .Build();
         }
 

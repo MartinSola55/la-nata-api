@@ -2,7 +2,7 @@
 
 .NET 10 Web API for **La Ñata** — rental of chairs, tables, tableware, linen and furniture.
 
-This is the backend rewrite of the legacy ASP.NET MVC 5 application (`La_Nata`). It keeps the same business rules and the same Spanish user-facing messages, but exposes them as a JSON API with JWT authentication, an audit trail, and generated PDF/CSV/XLSX documents instead of Razor print views. The web frontend is a separate project and does not exist yet.
+This is the backend rewrite of the legacy ASP.NET MVC 5 application (`La_Nata`). It keeps the same business rules and the same Spanish user-facing messages, but exposes them as a JSON API with JWT authentication, an audit trail, and generated PDF/XLSX documents instead of Razor print views. The web frontend lives in the separate `la-nata-web` repository.
 
 **It runs against the existing production database.** The schema is not ours to redesign: the entities map onto the legacy tables through `[Table]` and `[Column]` attributes, and the only DDL the API ever runs is additive — the audit columns and a separate `audit` schema. Nothing existing is altered, renamed or dropped.
 
@@ -23,7 +23,7 @@ The project is grouped into libraries by business area. They are folders inside 
 LaNata-Api/
   Core/                 Products, orders, expenses, dashboard, users, roles, auth, DbContext, shared DTOs/constants.
   Audit/                Audit trail: AuditableEntity, AuditInterceptor and the audit schema.
-  Export/               CSV and XLSX generation.
+  Export/               XLSX generation.
   Report/               PDF generation.
   Program.cs            Composition root and middleware pipeline.
   appsettings.json
@@ -53,22 +53,25 @@ All SQL migrations live together in `Core/DAL/Migrations`, whichever library own
 
 ## Domain
 
-The C# names are readable; the columns underneath are the legacy ones:
+Migration `04` renamed every column to PascalCase and `Rol` to `Role`, so the C# names and the columns now match and no `[Column]` attributes are needed:
 
 | Entity | Table | Notes |
 |---|---|---|
-| `Product` | `Product` | `description`, `stock` (bigint), `price`, `break_price` |
-| `Order` | `Order` | `client_name`, `phone`, `event_adress` (legacy typo kept in the column), `date`, `shipment_price`, `observation` |
-| `ProductOrder` | `ProductOrder` | join table, keyed by `(id_product, id_order, unit_price)` |
-| `Expense` | `Expense` | `date`, `description`, `price` |
-| `Role` | `Rol` | two rows: `Administrador` and `Empleado` |
-| `User` | `User` | `email`, `password`, `id_rol` — there are no name columns |
+| `Category` | `Category` | `Description`; groups the catalogue so the price list can be printed per rubro |
+| `Product` | `Product` | `Description`, `Stock`, `Price`, `BreakPrice`, `CategoryId` |
+| `ProductVariant` | `ProductVariant` | `ProductId`, `Description`, `Stock`, `PriceExtra` — a variant with its own stock |
+| `ProductPriceHistory` | `ProductPriceHistory` | append-only log of price changes and what each one did to the open orders |
+| `Order` | `Order` | `ClientName`, `Phone`, `EventAddress`, `Date`, `ShipmentPrice`, `Observation`, `PaidAt`, `PaidBy` |
+| `ProductOrder` | `ProductOrder` | order line; surrogate `Id`, unique on `(ProductId, OrderId, UnitPrice, VariantId)` |
+| `Expense` | `Expense` | `Date`, `Description`, `Price` |
+| `Role` | `Role` | two rows: `Administrador` and `Empleado` |
+| `User` | `User` | `Email`, `PasswordHash`, `RoleId` — there are no name columns |
 
-`Product`, `Order`, `Expense` and `User` inherit `AuditableEntity`, so every row is soft deleted and carries who created, edited and deleted it. `ProductOrder` does not: it is a join table with no `deleted_at`, and the app hard deletes from it exactly as the legacy did.
+`Category`, `Product`, `ProductVariant`, `Order`, `Expense` and `User` inherit `AuditableEntity`, so every row is soft deleted and carries who created, edited and deleted it. Two do not: `ProductOrder`, which the app hard deletes from exactly as the legacy did, and `ProductPriceHistory`, which is never edited or removed.
 
-### Money is `double`, not `decimal`
+### Money is `decimal(18, 2)`
 
-Every price column in the production schema is `float`. Mapping `decimal` onto it would round silently on every write, so the entities and DTOs use `double`. This is the one place where the code follows the database instead of good practice — changing the columns to `decimal(18,2)` is the fix, and it is a schema migration nobody has authorised.
+The legacy columns were `float`. Migration `05` converted them to `DECIMAL(18, 2)` and the entities carry `[Precision(18, 2)]` on every money property. Do not go back to `double`.
 
 ### Event dates carry a time
 
@@ -80,11 +83,18 @@ The consequence matters more than the cause: **every date filter is a half-open 
 
 40 of the 274 products are soft deleted, and 170 order lines across 164 orders point at them. The global soft-delete query filter turns a naive `Include(x => x.Products).ThenInclude(x => x.Product)` into a join that **drops those lines**, under-reporting both the line count and the order total.
 
-`OrderService.LoadLineProducts` is the answer: it resolves the products behind an order's lines with `IgnoreQueryFilters()`. Anything that reads an order's lines has to go through it — `GetOne`, `Report`, `RemoveProduct` and the date-change validation all do.
+`OrderService.LoadLineProducts` is the answer: it resolves the products behind an order's lines with `IgnoreQueryFilters()`, and `LoadLineVariants` does the same for variants. Anything that reads an order's lines has to go through them — `GetOne`, `Report` and the audit snapshot in `Update` all do. `BuildOrderProducts` loads the requested variants the same way, or re-saving an order that books a retired variant would be impossible.
 
-### Stock is per event date, not global
+### Stock is per event date, and there are two ceilings
 
-`Product.Stock` is the size of the catalogue, not what is free. What matters is availability **on the day of an event**: the stock minus everything the orders of that same date already reserve. This is the single rule the whole ordering flow is built on, and it is what `POST /api/Product/GetStock` answers:
+`Product.Stock` is the size of the catalogue, not what is free. What matters is availability **on the day of an event**: the stock minus everything the orders of that same date already reserve.
+
+A **variant** has its own stock on top of that, and a line that picks one consumes both. 100 chairs with 80 white covers means:
+
+- 80 lines can take the white cover, and the 81st is refused on the *variant* ceiling;
+- the remaining 20 can take another variant or none, and the 101st is refused on the *product* ceiling.
+
+`POST /api/Product/GetStock` answers both at once:
 
 ```json
 { "date": "2026-09-15" }
@@ -92,30 +102,44 @@ The consequence matters more than the cause: **every date filter is a half-open 
 
 ```json
 { "id": 1, "description": "Silla plastica blanca",
-  "stock": 100, "reservedStock": 50, "availableStock": 50 }
+  "stock": 100, "reservedStock": 50, "availableStock": 50,
+  "variants": [
+    { "id": 7, "description": "Funda blanca", "priceExtra": 200,
+      "stock": 80, "reservedStock": 40, "availableStock": 40 }
+  ] }
 ```
 
 Pass `excludeOrderId` while editing an order so its own reservation is not counted against it.
 
-Every write path re-checks availability server-side: creating an order, adding a product to one, and moving an order to another date.
+`OrderService.GetReservations` resolves both dictionaries in **two round trips** whatever the order holds, and `BuildOrderProducts` applies the two ceilings in memory. Every write path re-checks availability server-side: creating an order, editing one, and moving an order to another date.
 
-### One product can appear twice in an order
+### One product can appear several times in an order
 
-`ProductOrder` is keyed by `(id_product, id_order, unit_price)`, so the same product can be reserved twice at different prices — the price a client was quoted before a price change, plus the current one.
+`ProductOrder` has a surrogate `Id` primary key and a unique index on `(ProductId, OrderId, UnitPrice, VariantId)`. So the same product can be reserved twice at different prices — the price a client was quoted before a change, plus the current one — and also twice at the same price with different variants.
 
-**The price identifies the line**: `AddProduct` without `unitPrice` merges into (or opens) the line at the current catalogue price, and with `unitPrice` it targets the line at that price. `RemoveProduct` takes the price too — removing the whole reserved quantity hard deletes the row, anything less subtracts. There is no `deleted_at` on this table, so a removal is physical, exactly as the legacy did it.
+`VariantId` is nullable, which is why it could not live in a composite primary key; migration `09` rebuilt the key for exactly this. SQL Server treats NULLs as **equal** inside a unique index, so an order still holds only one "sin variante" line per product and price.
+
+The whole line set travels in one call: `Order/Create` and `Order/Update`. `Update` reconciles by `(ProductId, UnitPrice, VariantId)` — matched lines get their quantity patched, unmatched ones are hard deleted, leftovers are inserted. The unit price is `Product.Price + (variant.PriceExtra ?? 0)` unless the request supplies one.
 
 Deleting an order only stamps `deleted_at` on the order itself. Its lines stay, and the stock they reserved is released anyway because every availability query reaches them through `Order`.
 
+### Raising a price follows through to the open orders
+
+Raising a product's price re-prices the lines of orders that are **not paid** and whose **event has not happened**. A paid order and a past event stay frozen at what was agreed, and a line at any other price is a quote somebody chose to hold.
+
+It all happens inside `Product/Update`, in one transaction with the product save and the `ProductPriceHistory` row, so the log can never claim a re-pricing that rolled back. When the order already holds a line at the target price the two are merged with their quantities summed; over the quantity cap both are left untouched and counted as skipped.
+
+`GET /api/Product/GetPriceHistory?id=1` returns every change with how many orders and lines it moved.
+
+`ProductOrder` has no `deleted_at`, so this rewrites rows with no undo. The predicate is the whole safety of the operation — rehearse any change to it against a restored copy.
+
+### Payment freezes an order
+
+`Order/MarkAsPaid` and `Order/MarkAsUnpaid` stamp `PaidAt` / `PaidBy`. A paid order stays editable on purpose — fixing a typo should not require cancelling the charge. The order listing filters on `paid`, and the balance reports billed and collected income side by side.
+
 ### Text normalization
 
-The legacy app normalized every free text field on the way in, and so does this one (`Core/Helpers/TextHelper.cs`), because product descriptions are unique by text and reports must print consistently:
-
-| Field | Rule | Example |
-|---|---|---|
-| Client name | letters only, title case | `juan PEREZ` → `Juan Perez` |
-| Description, address, observation | letters and digits, first letter upper | `silla PLASTICA blanca` → `Silla plastica blanca` |
-| Phone | digits only | `(03404) 42-0949` → `03404420949` |
+There is **no** `TextHelper`. Services trim the incoming strings when building the entity and nothing else. The legacy casing rules (title case for client names, upper-first for descriptions) are not implemented; if they are ever wanted back, the helper belongs in `Core/Helpers/` and is applied in the service, never in the controller.
 
 ## Endpoints
 
@@ -127,24 +151,32 @@ POST /api/Auth/Logout
 
 GET  /api/Dashboard/Get                 Product count
 
+GET  /api/Category/GetCombo
+POST /api/Category/GetAll
+GET  /api/Category/GetOne
+POST /api/Category/Create
+POST /api/Category/Update
+POST /api/Category/Delete               Refused while the category has products
+
 GET  /api/Product/GetCombo
-POST /api/Product/GetAll                Search by description
-GET  /api/Product/GetOne
-POST /api/Product/Create
-POST /api/Product/Update
+POST /api/Product/GetAll                Search by description, filter by category
+GET  /api/Product/GetOne                Detail with its variants
+POST /api/Product/Create                Product + variants in one call
+POST /api/Product/Update                Product + variants; a rise re-prices the open orders
 POST /api/Product/Delete
-POST /api/Product/GetStock              Availability for an event date
-POST /api/Product/Report                PDF price list
+POST /api/Product/GetStock              Availability for an event date, product and variants
+GET  /api/Product/GetPriceHistory       Every price change and what it moved
+POST /api/Product/Report                PDF price list; filter by category for a partial list
 POST /api/Product/ExportExcel
 
-POST /api/Order/GetAll                  By day, or by date range
-GET  /api/Order/GetOne                  Detail with lines and totals
-POST /api/Order/Create                  Header + product list in one call
-POST /api/Order/Update                  Header only
+POST /api/Order/GetAll                  By day or date range, filter by payment state
+GET  /api/Order/GetOne                  Detail with lines, variants and totals
+POST /api/Order/Create                  Header + line list in one call
+POST /api/Order/Update                  Header + the whole line set, reconciled
 POST /api/Order/Delete
 POST /api/Order/GetDates                Days holding orders, for the calendar
-POST /api/Order/AddProduct
-POST /api/Order/RemoveProduct
+POST /api/Order/MarkAsPaid              Freezes the order against price rises
+POST /api/Order/MarkAsUnpaid
 POST /api/Order/Report                  PDF detail, with or without prices
 POST /api/Order/Budget                  PDF quote for an order not yet created
 POST /api/Order/ExportExcel
@@ -154,7 +186,7 @@ GET  /api/Expense/GetOne
 POST /api/Expense/Create
 POST /api/Expense/Update
 POST /api/Expense/Delete
-POST /api/Expense/GetBalance            Expenses, income and profit between two dates
+POST /api/Expense/GetBalance            Expenses, billed and collected income, profit
 POST /api/Expense/Report                PDF balance
 POST /api/Expense/ExportExcel
 
@@ -162,7 +194,7 @@ POST /api/User/...                      User management (admin)
 POST /api/Audit/GetAll                  Audit trail (admin)
 ```
 
-Listings return the **whole filtered set**, unsorted pagination aside, exactly as the legacy screens did. `GetAllRequest` extends `SortRequest` (`ColumnSort` + `SortDirection`); leaving `ColumnSort` unset keeps each listing's natural order. Users and the audit trail do paginate and extend `PaginateRequest` instead.
+Listings return the **whole filtered set**, exactly as the legacy screens did — nothing paginates, on either side. `GetAllRequest` extends `SortRequest` (`ColumnSort` + `SortDirection`); leaving `ColumnSort` unset keeps each listing's natural order. What bounds a response is its filters: the audit trail is the only table with unbounded growth, and its screen defaults to the current month.
 
 ### How the legacy maps onto it
 
@@ -171,8 +203,8 @@ Listings return the **whole filtered set**, unsorted pagination aside, exactly a
 | `Orders/Index?date=` | `POST /Order/GetAll` with `date` |
 | `Orders/OrdersDates` | `POST /Order/GetDates` |
 | `Orders/Create` + `AddProducts` + session basket | `POST /Order/Create` — the whole order in one call |
-| `Orders/AddToExistingOrder` | `POST /Order/AddProduct` |
-| `Orders/RemoveFromExistingOrder` | `POST /Order/RemoveProduct` |
+| `Orders/AddToExistingOrder` | `POST /Order/Update` — the whole line set, reconciled |
+| `Orders/RemoveFromExistingOrder` | `POST /Order/Update` — a line left out of the set is removed |
 | `Orders/ReportWithPrice` / `ReportWithoutPrice` | `POST /Order/Report` with `withPrice` |
 | `Orders/ReportBudget` | `POST /Order/Budget` |
 | `Products/ProductsStock` | `POST /Product/GetStock` |
@@ -257,7 +289,7 @@ Use the returned JWT as a bearer token:
 Authorization: Bearer <token>
 ```
 
-Roles are `Administrador` and `Empleado` — the text already sitting in the `Rol` table, which is what travels in the JWT role claim. The business endpoints only require authentication, matching the legacy behaviour where every logged-in user could manage products, orders and expenses; user administration and the audit trail are admin-only.
+Roles are `Administrador` and `Empleado` — the text already sitting in the `Role` table, which is what travels in the JWT role claim. The business endpoints only require authentication, matching the legacy behaviour where every logged-in user could manage products, orders and expenses; user administration and the audit trail are admin-only.
 
 ### Existing passwords must be reset once
 
@@ -290,11 +322,24 @@ All migrations are plain SQL scripts under a single folder:
 
 ```text
 LaNata-Api/Core/DAL/Migrations
-  01_Audit_Columns.sql        ALTER TABLE ... ADD on User, Product, Order, Expense
-  02_Audit_Schema.sql         The audit schema, its two catalogs and the entry table
+  01_Audit_Columns.sql                        Audit columns and FKs on User, Product, Order, Expense
+  02_Audit_Schema.sql                         The audit schema, its two catalogs and the entry table
+  03_Product_BreakPrice_Nullable.sql
+  04_Rename_Columns_To_Model_Names.sql        snake_case -> PascalCase, Rol -> Role
+  05_Data_Types_And_Validation_Constraints.sql  float -> DECIMAL(18,2), CHECK constraints
+  06_Remove_Order_Product_Audit_Actions.sql
+  07_Category.sql                             Category table and Product.CategoryId
+  08_Order_Payment_And_Price_History.sql      Order.PaidAt/PaidBy and ProductPriceHistory
+  09_Product_Variants.sql                     ProductVariant and the ProductOrder key rebuild
+  10_Drop_Numeric_Check_Constraints.sql       Numeric bounds move out of the database into the API
 ```
 
-Scripts are executed in filename order. Each executed filename is stored in `_Migrations`, so each script runs once. New scripts keep the numeric prefix (`03_Add_New_Feature.sql`).
+Scripts are executed in filename order. Each executed filename is stored in `_Migrations`, so each script runs once. New scripts keep the numeric prefix (`10_Add_New_Feature.sql`).
+
+Two things to know before writing one:
+
+- **Each file is sent as a single batch**, with no `GO`. T-SQL resolves the column names of an already existing table at compile time, so a statement naming a column added earlier *in the same file* fails with "Invalid column name" and rolls the whole file back. Wrap those in `EXEC sys.sp_executesql N'...'`, as `05`, `07`, `08` and `09` do.
+- **`09` is not additive**: it rebuilds `PK_ProductOrder` on a table holding every order line ever written. Full backup, a rehearsal on a restored copy, and preferably a manual run in a maintenance window with `Database:RunSqlMigrations` set to `false`.
 
 What `01_Audit_Columns.sql` adds, and nothing else:
 
@@ -305,7 +350,7 @@ What `01_Audit_Columns.sql` adds, and nothing else:
 | `Order` | `updated_at`, `created_by`, `updated_by`, `deleted_by` |
 | `Expense` | `created_at`, `updated_at`, `created_by`, `updated_by`, `deleted_by` |
 
-`Product.created_at`, `Product.deleted_at`, `Order.created_at`, `Order.deleted_at` and `Expense.deleted_at` were already there and are left alone. `ProductOrder` and `Rol` are not touched at all.
+`Product.created_at`, `Product.deleted_at`, `Order.created_at`, `Order.deleted_at` and `Expense.deleted_at` were already there and are left alone. `ProductOrder` and `Rol` are not touched by `01`; migration `04` later renamed every one of these columns to PascalCase, and `Rol` to `Role`.
 
 The three tables in `02_Audit_Schema.sql` live in their own `audit` schema, so they add no columns, indexes or triggers to anything operational. Dropping the schema reverts them completely.
 
@@ -321,7 +366,7 @@ The `Audit` library covers two separate needs.
 
 ```text
 audit.AuditCategory   Groups actions (Seguridad, Datos, Documentos).
-audit.AuditAction     Action catalog (CREATED, UPDATED, DELETED, PRODUCT_ADDED, EXPORTED, …).
+audit.AuditAction     Action catalog (CREATED, UPDATED, DELETED, ORDER_PAID, EXPORTED, …).
 audit.AuditEntry      One row per audited operation, with before/after snapshots.
 ```
 
@@ -368,7 +413,9 @@ Builder methods:
 | `AddLookup(x => x.RoleId, resolver, "Rol")` | Foreign keys and codes; the resolver returns the text the user should read. |
 | `AddCollection<TItem>(x => x.Items, x => x.Id, x => x.Name, "Productos")` | Collections; reports items added and removed, compared by key. |
 
-Order lines are not diffed through the change list: `AddProduct` and `RemoveProduct` write their own `PRODUCT_ADDED` / `PRODUCT_REMOVED` entries carrying the product, quantity and unit price, which reads better than a collection diff.
+Order lines are not diffed through the change list either: `BuildUpdateAuditChanges` stores the full before/after line snapshots — product, variant, quantity, unit price and subtotal — in `State` and `Payload`, plus one synthetic change entry, which reads better than a collection diff. `HaveSameProductLines` compares `(ProductId, Quantity, UnitPrice, VariantId)`; dropping `VariantId` there would make a variant swap vanish from the trail.
+
+A product update writes a single `UPDATED` entry containing the product fields, variant changes and, when applicable, the affected order ids and re-priced line counts under `Payload.Repricing`.
 
 Reading the trail (admin only): `POST /api/Audit/GetAll`, `GET /api/Audit/GetOne`, `GET /api/Audit/GetFilters`.
 
@@ -380,7 +427,7 @@ Notes:
 
 ## Export
 
-`ExportService` turns any in-memory collection into a CSV or XLSX file. Nothing is exported implicitly — the calling service declares the columns, the same rule the audit change list follows:
+`ExportService` turns any in-memory collection into an XLSX file. Nothing is exported implicitly — the calling service declares the columns, the same rule the audit change list follows:
 
 ```csharp
 var columns = ExportColumns
@@ -402,17 +449,13 @@ var rs = await _exportService.Export(ExportFileFormat.Excel, new ExportRequest<P
 
 | Method | Output |
 |---|---|
-| `ToCsv(rq)` | UTF-8 CSV with BOM, `;` delimiter by default |
 | `ToExcel(rq)` | Single-sheet XLSX, frozen header, autofilter, sized columns |
-| `Export(format, rq)` | Either of the above, format chosen at runtime |
+| `Export(format, rq)` | Dispatches on `ExportFileFormat`, which today has only `Excel` |
 | `ToExcelWorkbook(rq)` | Multi-sheet XLSX |
 
-`ExportValueFormat` drives both outputs: in CSV it picks the text, in XLSX it also picks the **cell type**, so numbers and dates arrive as real numbers and dates and stay sortable. Use `Text` for codes that must keep their leading zeros — phone numbers use it.
+`ExportValueFormat` picks the **cell type**, so numbers and dates arrive as real numbers and dates and stay sortable. Use `Text` for codes that must keep their leading zeros — phone numbers use it.
 
-Two details worth knowing:
-
-- **CSV is written with a UTF-8 BOM.** Without it Excel opens the file in the system codepage and every accent breaks.
-- **Values starting with `=`, `+`, `-` or `@` are prefixed with a quote.** This blocks CSV injection, where exported user input is executed as a formula when the file is opened.
+There is no CSV writer. If one is ever wanted back it needs a UTF-8 BOM (or Excel opens the file in the system codepage and every accent breaks), `;` as the delimiter for Spanish locales, and a quote prefix on values starting with `=`, `+`, `-` or `@` so exported user input cannot run as a formula when the file is opened.
 
 ## Report
 

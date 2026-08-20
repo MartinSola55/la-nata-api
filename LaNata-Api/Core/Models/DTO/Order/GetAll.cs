@@ -10,6 +10,7 @@ namespace LaNata_Api.Core.Models.DTO.Order
         public DateTime? DateFrom { get; set; }
         public DateTime? DateTo { get; set; }
         public string Search { get; set; }
+        public bool? Paid { get; set; }
     }
 
     public class GetAllResponse
@@ -27,6 +28,8 @@ namespace LaNata_Api.Core.Models.DTO.Order
             public string Observation { get; set; }
             public int ProductsCount { get; set; }
             public decimal Total { get; set; }
+            public DateTime? PaidAt { get; set; }
+            public string PaidByEmail { get; set; }
             public DateTime CreatedAt { get; set; }
         }
     }

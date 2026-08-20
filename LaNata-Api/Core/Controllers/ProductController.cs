@@ -57,6 +57,12 @@ namespace LaNata_Api.Core.Controllers
         {
             return await _productService.GetStock(rq);
         }
+
+        [HttpGet]
+        public async Task<BaseResponse<GetPriceHistoryResponse>> GetPriceHistory([FromQuery] GetPriceHistoryRequest rq)
+        {
+            return await _productService.GetPriceHistory(rq);
+        }
         #endregion
 
         #region Documents

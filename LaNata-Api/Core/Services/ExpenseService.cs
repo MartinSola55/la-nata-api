@@ -224,6 +224,7 @@ namespace LaNata_Api.Core.Services
                 DateTo = data.DateTo,
                 TotalExpenses = data.TotalExpenses,
                 TotalIncome = data.TotalIncome,
+                TotalIncomePaid = data.TotalIncomePaid,
                 Profit = data.Profit,
                 Expenses = [.. data.Expenses.Select(x => new GetBalanceResponse.ExpenseItem
                 {
@@ -239,7 +240,8 @@ namespace LaNata_Api.Core.Services
                     ClientName = x.ClientName,
                     EventAddress = x.EventAddress,
                     ShipmentPrice = x.ShipmentPrice,
-                    Total = x.Total
+                    Total = x.Total,
+                    PaidAt = x.PaidAt
                 })]
             };
 
@@ -313,8 +315,9 @@ namespace LaNata_Api.Core.Services
                 ],
                 Summary =
                 [
-                    new("Gastos", Currency(data.TotalExpenses)),
                     new("Ingresos", Currency(data.TotalIncome)),
+                    new("Cobrado", Currency(data.TotalIncomePaid)),
+                    new("Gastos", Currency(data.TotalExpenses)),
                     new("Ganancias", Currency(data.Profit))
                 ]
             };
@@ -393,8 +396,11 @@ namespace LaNata_Api.Core.Services
             if (expense.Description.Length > ValidationLimits.ExpenseDescriptionMaxLength)
                 return rs.SetError(Messages.Error.FieldTooLong("descripción", ValidationLimits.ExpenseDescriptionMaxLength));
 
-            if (expense.Price <= 0 || expense.Price > ValidationLimits.ExpensePriceMax)
+            if (expense.Price <= 0)
                 return rs.SetError(Messages.Error.FieldGraterThanZero("monto"));
+
+            if (expense.Price > ValidationLimits.ExpensePriceMax)
+                return rs.SetError(Messages.Error.FieldMax("monto", ValidationLimits.ExpensePriceMax));
 
             return rs;
         }
@@ -442,7 +448,8 @@ namespace LaNata_Api.Core.Services
                     ClientName = x.ClientName,
                     EventAddress = x.EventAddress,
                     ShipmentPrice = x.ShipmentPrice,
-                    Total = x.Products.Sum(p => p.Quantity * p.UnitPrice) + (x.ShipmentPrice ?? 0)
+                    Total = x.Products.Sum(p => p.Quantity * p.UnitPrice) + (x.ShipmentPrice ?? 0),
+                    PaidAt = x.PaidAt
                 })
                 .OrderByDescending(x => x.Date)
                 .ThenByDescending(x => x.Total)
@@ -455,7 +462,8 @@ namespace LaNata_Api.Core.Services
                 Expenses = expenses,
                 Income = income,
                 TotalExpenses = expenses.Sum(x => x.Price),
-                TotalIncome = income.Sum(x => x.Total)
+                TotalIncome = income.Sum(x => x.Total),
+                TotalIncomePaid = income.Where(x => x.PaidAt.HasValue).Sum(x => x.Total)
             };
 
             return rs;

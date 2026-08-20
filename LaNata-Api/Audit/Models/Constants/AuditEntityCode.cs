@@ -4,6 +4,7 @@ namespace LaNata_Api.Audit.Models.Constants
     public static class AuditEntityCode
     {
         public const string USER = "USER";
+        public const string CATEGORY = "CATEGORY";
         public const string PRODUCT = "PRODUCT";
         public const string ORDER = "ORDER";
         public const string EXPENSE = "EXPENSE";

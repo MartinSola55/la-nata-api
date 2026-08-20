@@ -23,6 +23,12 @@ namespace LaNata_Api.Core.Models
         public decimal? ShipmentPrice { get; set; }
         public string Observation { get; set; }
 
+        public DateTime? PaidAt { get; set; }
+        public int? PaidBy { get; set; }
+
+        [ForeignKey("PaidBy")]
+        public virtual User PaidByUser { get; set; }
+
         public virtual List<ProductOrder> Products { get; set; } = [];
     }
 }

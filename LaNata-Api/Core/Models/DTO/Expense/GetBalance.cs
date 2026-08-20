@@ -16,6 +16,7 @@ namespace LaNata_Api.Core.Models.DTO.Expense
         public DateTime DateTo { get; set; }
         public decimal TotalExpenses { get; set; }
         public decimal TotalIncome { get; set; }
+        public decimal TotalIncomePaid { get; set; }
         public decimal Profit { get; set; }
         public List<ExpenseItem> Expenses { get; set; } = [];
         public List<IncomeItem> Income { get; set; } = [];
@@ -36,6 +37,7 @@ namespace LaNata_Api.Core.Models.DTO.Expense
             public string EventAddress { get; set; }
             public decimal? ShipmentPrice { get; set; }
             public decimal Total { get; set; }
+            public DateTime? PaidAt { get; set; }
         }
     }
 }

@@ -50,6 +50,17 @@ namespace LaNata_Api.Core.Controllers
             return await _orderService.GetDates(rq);
         }
 
+        [HttpPost]
+        public async Task<BaseResponse> MarkAsPaid([FromBody] MarkAsPaidRequest rq)
+        {
+            return await _orderService.MarkAsPaid(rq);
+        }
+
+        [HttpPost]
+        public async Task<BaseResponse> MarkAsUnpaid([FromBody] MarkAsUnpaidRequest rq)
+        {
+            return await _orderService.MarkAsUnpaid(rq);
+        }
         #endregion
 
         #region Documents

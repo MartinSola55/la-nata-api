@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace LaNata_Api.Core.Models.DTO.User
 {
-    public class GetAllRequest : PaginateRequest
+    public class GetAllRequest : SortRequest
     {
         public DateTime? DateFrom { get; set; }
         public DateTime? DateTo { get; set; }

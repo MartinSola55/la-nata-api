@@ -19,18 +19,6 @@ namespace LaNata_Api.Core.Services
             return null;
         }
 
-        public static string ValidatePagination(PaginateRequest rq)
-        {
-            var sortError = ValidateSort(rq);
-            if (sortError != null)
-                return sortError;
-
-            if (rq != null && (rq.Page <= 0 || rq.Page > Pagination.MaxPage))
-                return Messages.Error.InvalidField("página");
-
-            return null;
-        }
-
         public static string ValidateSearch(string search)
         {
             return !string.IsNullOrEmpty(search) && search.Length > ValidationLimits.SearchMaxLength

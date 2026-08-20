@@ -20,6 +20,12 @@ namespace LaNata_Api.Core.Models
         [Precision(18, 2)]
         public decimal? BreakPrice { get; set; }
 
+        public int? CategoryId { get; set; }
+
+        [ForeignKey("CategoryId")]
+        public virtual Category Category { get; set; }
+
+        public virtual List<ProductVariant> Variants { get; set; } = [];
         public virtual List<ProductOrder> Orders { get; set; } = [];
     }
 }

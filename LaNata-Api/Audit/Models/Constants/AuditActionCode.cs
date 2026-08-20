@@ -6,6 +6,8 @@ namespace LaNata_Api.Audit.Models.Constants
         public const string CREATED = "CREATED";
         public const string UPDATED = "UPDATED";
         public const string DELETED = "DELETED";
+        public const string ORDER_PAID = "ORDER_PAID";
+        public const string ORDER_UNPAID = "ORDER_UNPAID";
         public const string LOGIN = "LOGIN";
         public const string LOGIN_FAILED = "LOGIN_FAILED";
         public const string PASSWORD_CHANGED = "PASSWORD_CHANGED";

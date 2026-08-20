@@ -6,6 +6,7 @@ namespace LaNata_Api.Core.Models.DTO.Product
     public class GetAllRequest : SortRequest
     {
         public string Search { get; set; }
+        public int? CategoryId { get; set; }
     }
 
     public class GetAllResponse
@@ -19,6 +20,9 @@ namespace LaNata_Api.Core.Models.DTO.Product
             public int Stock { get; set; }
             public decimal Price { get; set; }
             public decimal? BreakPrice { get; set; }
+            public int? CategoryId { get; set; }
+            public string CategoryDescription { get; set; }
+            public int VariantsCount { get; set; }
             public DateTime CreatedAt { get; set; }
         }
     }

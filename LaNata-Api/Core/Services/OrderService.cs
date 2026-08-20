@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -27,6 +27,7 @@ namespace LaNata_Api.Core.Services
     public class OrderService(APIContext context, AuditService auditService, ExportService exportService, ReportService reportService, TokenService tokenService)
     {
         private const string ShipmentRowDescription = "Flete";
+        private const string NoVariant = "Sin variante";
 
         // Every one of the 2200 rows already in production stores the event day at 12:00, because the
         // legacy app added 12 hours to dodge a timezone problem in its date input. New rows keep the
@@ -70,6 +71,8 @@ namespace LaNata_Api.Core.Services
                             Observation = x.Observation,
                             ProductsCount = x.Products.Count,
                             Total = x.Products.Sum(p => p.Quantity * p.UnitPrice) + (x.ShipmentPrice ?? 0),
+                            PaidAt = x.PaidAt,
+                            PaidByEmail = x.PaidByUser.Email,
                             CreatedAt = x.CreatedAt
                         })
                         .ToListAsync()
@@ -87,13 +90,14 @@ namespace LaNata_Api.Core.Services
             var order = await _db
                 .Order
                 .Include(x => x.Products)
+                .Include(x => x.PaidByUser)
                 .AsNoTracking()
                 .FirstOrDefaultAsync(x => x.Id == rq.Id);
 
             if (order == null)
                 return rs.SetError(Messages.Error.EntityNotFound("Pedido"));
 
-            rs.Data = MapOrder(order, await LoadLineProducts(order.Products));
+            rs.Data = MapOrder(order, await LoadLineProducts(order.Products), await LoadLineVariants(order.Products));
             return rs;
         }
 
@@ -142,7 +146,7 @@ namespace LaNata_Api.Core.Services
                 ClientName = order.ClientName,
                 Date = order.Date,
                 Total = CalculateTotal(order),
-                Products = [.. order.Products.Select(x => MapOrderProduct(x, x.Product))]
+                Products = [.. order.Products.Select(x => MapOrderProduct(x, x.Product, x.Variant))]
             };
 
             return rs;
@@ -179,13 +183,16 @@ namespace LaNata_Api.Core.Services
             if (!linesResponse.Success)
                 return rs.SetError(linesResponse.Error.Message);
 
-            var auditProducts = await LoadLineProducts(previous.Products.Concat(linesResponse.Data));
-            var auditChanges = BuildUpdateAuditChanges(previous, order, linesResponse.Data, auditProducts);
-            var requestedLines = linesResponse.Data.ToDictionary(x => (x.ProductId, x.UnitPrice));
+            var auditLines = previous.Products.Concat(linesResponse.Data).ToList();
+            var auditProducts = await LoadLineProducts(auditLines);
+            var auditVariants = await LoadLineVariants(auditLines);
+            var auditChanges = BuildUpdateAuditChanges(previous, order, linesResponse.Data, auditProducts, auditVariants);
+
+            var requestedLines = linesResponse.Data.ToDictionary(x => (x.ProductId, x.UnitPrice, x.VariantId));
 
             foreach (var existingLine in order.Products.ToList())
             {
-                if (requestedLines.Remove((existingLine.ProductId, existingLine.UnitPrice), out var requestedLine))
+                if (requestedLines.Remove((existingLine.ProductId, existingLine.UnitPrice, existingLine.VariantId), out var requestedLine))
                 {
                     existingLine.Quantity = requestedLine.Quantity;
                     continue;
@@ -280,6 +287,15 @@ namespace LaNata_Api.Core.Services
             return rs;
         }
 
+        public async Task<BaseResponse> MarkAsPaid(MarkAsPaidRequest rq)
+        {
+            return await SetPaid(rq?.Id ?? 0, true);
+        }
+
+        public async Task<BaseResponse> MarkAsUnpaid(MarkAsUnpaidRequest rq)
+        {
+            return await SetPaid(rq?.Id ?? 0, false);
+        }
         #endregion
 
         #region Documents
@@ -301,6 +317,7 @@ namespace LaNata_Api.Core.Services
                 .Add(x => x.Products.Count, "Productos", ExportValueFormat.Integer)
                 .Add(x => x.ShipmentPrice, "Flete", ExportValueFormat.Currency)
                 .Add("Total", x => CalculateTotal(x), ExportValueFormat.Currency)
+                .Add(x => x.PaidAt, "Cobrado", ExportValueFormat.DateTime)
                 .Add(x => x.Observation, "Observación", width: 40)
                 .Build();
 
@@ -335,15 +352,17 @@ namespace LaNata_Api.Core.Services
                 return rs.SetError(Messages.Error.EntityNotFound("Pedido"));
 
             var lineProducts = await LoadLineProducts(order.Products);
+            var lineVariants = await LoadLineVariants(order.Products);
 
             var productRows = order.Products
                 .Select(x =>
                 {
                     var product = lineProducts.GetValueOrDefault(x.ProductId);
+                    var variant = x.VariantId.HasValue ? lineVariants.GetValueOrDefault(x.VariantId.Value) : null;
 
                     return new OrderReportRow
                     {
-                        Description = product?.Description,
+                        Description = variant == null ? product?.Description : product?.Description + " (" + variant.Description + ")",
                         Quantity = x.Quantity,
                         UnitPrice = x.UnitPrice,
                         BreakPrice = product?.BreakPrice,
@@ -394,25 +413,51 @@ namespace LaNata_Api.Core.Services
             var productIds = rq.Products.Select(x => x.ProductId).Distinct().ToList();
             var products = await _db.Product.AsNoTracking().Where(x => productIds.Contains(x.Id)).ToListAsync();
 
+            var variantIds = rq.Products
+                .Where(x => x.VariantId.HasValue)
+                .Select(x => x.VariantId.Value)
+                .Distinct()
+                .ToList();
+
+            // No IgnoreQueryFilters here, unlike the order paths: a quote prices something that has
+            // not been booked yet, so a retired variant must not be quotable
+            var variants = variantIds.Count == 0
+                ? []
+                : await _db.ProductVariant.AsNoTracking().Where(x => variantIds.Contains(x.Id)).ToListAsync();
+
+            if (variants.Count != variantIds.Count)
+                return rs.SetError(Messages.Error.EntityNotFound("Variante", femine: true));
+
             var productRows = new List<OrderReportRow>();
 
-            foreach (var requested in rq.Products.GroupBy(x => x.ProductId))
+            // A variant is its own row at its own price: the surcharge rides on top of the product
+            // price, exactly as the order resolves it when it is finally created
+            foreach (var requested in rq.Products.GroupBy(x => new { x.ProductId, x.VariantId }))
             {
-                var product = products.FirstOrDefault(x => x.Id == requested.Key);
+                var product = products.FirstOrDefault(x => x.Id == requested.Key.ProductId);
                 if (product == null)
                     return rs.SetError(Messages.Error.EntityNotFound("Producto"));
+
+                var variant = requested.Key.VariantId.HasValue
+                    ? variants.First(x => x.Id == requested.Key.VariantId.Value)
+                    : null;
+
+                if (variant != null && variant.ProductId != product.Id)
+                    return rs.SetError(Messages.Error.VariantNotFromProduct());
 
                 var quantity = requested.Sum(x => x.Quantity);
                 if (quantity <= 0)
                     return rs.SetError(Messages.Error.FieldGraterThanZero("cantidad"));
 
+                var unitPrice = product.Price + (variant?.PriceExtra ?? 0);
+
                 productRows.Add(new OrderReportRow
                 {
-                    Description = product.Description,
+                    Description = variant == null ? product.Description : product.Description + " (" + variant.Description + ")",
                     Quantity = quantity,
-                    UnitPrice = product.Price,
+                    UnitPrice = unitPrice,
                     BreakPrice = product.BreakPrice,
-                    Subtotal = quantity * product.Price
+                    Subtotal = quantity * unitPrice
                 });
             }
 
@@ -447,6 +492,7 @@ namespace LaNata_Api.Core.Services
                 .AddField(x => x.Date, "Fecha", AuditFormat.Date)
                 .AddField(x => x.ShipmentPrice, "Flete", AuditFormat.Currency)
                 .AddField(x => x.Observation, "Observación")
+                .AddField(x => x.PaidAt, "Cobro", AuditFormat.Date)
                 .Build();
         }
 
@@ -454,14 +500,15 @@ namespace LaNata_Api.Core.Services
             Order previous,
             Order updated,
             IEnumerable<ProductOrder> updatedProducts,
-            IReadOnlyDictionary<int, Product> products)
+            IReadOnlyDictionary<int, Product> products,
+            IReadOnlyDictionary<int, ProductVariant> variants)
         {
             var changes = BuildAuditChanges(AuditChangeList.For(previous, updated));
             var previousLines = previous.Products ?? [];
             var currentLines = updatedProducts?.ToList() ?? [];
 
-            changes.State["Products"] = BuildProductAuditSnapshot(previousLines, products);
-            changes.Payload["Products"] = BuildProductAuditSnapshot(currentLines, products);
+            changes.State["Products"] = BuildProductAuditSnapshot(previousLines, products, variants);
+            changes.Payload["Products"] = BuildProductAuditSnapshot(currentLines, products, variants);
 
             if (!HaveSameProductLines(previousLines, currentLines))
             {
@@ -480,25 +527,33 @@ namespace LaNata_Api.Core.Services
 
         private static List<Dictionary<string, object>> BuildProductAuditSnapshot(
             IEnumerable<ProductOrder> lines,
-            IReadOnlyDictionary<int, Product> products)
+            IReadOnlyDictionary<int, Product> products,
+            IReadOnlyDictionary<int, ProductVariant> variants)
         {
             return lines
                 .Select(x =>
                 {
                     products.TryGetValue(x.ProductId, out var product);
 
+                    ProductVariant variant = null;
+                    if (x.VariantId.HasValue)
+                        variants.TryGetValue(x.VariantId.Value, out variant);
+
                     return new
                     {
                         Line = x,
-                        ProductName = product?.Description ?? $"Producto #{x.ProductId}"
+                        ProductName = product?.Description ?? $"Producto #{x.ProductId}",
+                        VariantName = variant?.Description ?? (x.VariantId.HasValue ? $"Variante #{x.VariantId.Value}" : NoVariant)
                     };
                 })
                 .OrderBy(x => x.ProductName)
                 .ThenBy(x => x.Line.ProductId)
                 .ThenBy(x => x.Line.UnitPrice)
+                .ThenBy(x => x.Line.VariantId)
                 .Select(x => new Dictionary<string, object>
                 {
                     ["Product"] = $"#{x.Line.ProductId} - {x.ProductName}",
+                    ["Variant"] = x.VariantName,
                     ["Quantity"] = x.Line.Quantity,
                     ["UnitPrice"] = Currency(x.Line.UnitPrice),
                     ["Subtotal"] = Currency(x.Line.Quantity * x.Line.UnitPrice)
@@ -511,11 +566,13 @@ namespace LaNata_Api.Core.Services
             var previousValues = previous
                 .OrderBy(x => x.ProductId)
                 .ThenBy(x => x.UnitPrice)
-                .Select(x => (x.ProductId, x.Quantity, x.UnitPrice));
+                .ThenBy(x => x.VariantId)
+                .Select(x => (x.ProductId, x.Quantity, x.UnitPrice, x.VariantId));
             var updatedValues = updated
                 .OrderBy(x => x.ProductId)
                 .ThenBy(x => x.UnitPrice)
-                .Select(x => (x.ProductId, x.Quantity, x.UnitPrice));
+                .ThenBy(x => x.VariantId)
+                .Select(x => (x.ProductId, x.Quantity, x.UnitPrice, x.VariantId));
 
             return previousValues.SequenceEqual(updatedValues);
         }
@@ -586,8 +643,11 @@ namespace LaNata_Api.Core.Services
             if (!string.IsNullOrEmpty(order.Phone) && order.Phone.Length > ValidationLimits.OrderPhoneMaxLength)
                 return rs.SetError(Messages.Error.FieldTooLong("teléfono", ValidationLimits.OrderPhoneMaxLength));
 
-            if (order.ShipmentPrice.HasValue && (order.ShipmentPrice.Value < 0 || order.ShipmentPrice.Value > ValidationLimits.OrderShipmentPriceMax))
+            if (order.ShipmentPrice.HasValue && order.ShipmentPrice.Value < 0)
                 return rs.SetError(Messages.Error.InvalidField("flete"));
+
+            if (order.ShipmentPrice > ValidationLimits.OrderShipmentPriceMax)
+                return rs.SetError(Messages.Error.FieldMax("flete", ValidationLimits.OrderShipmentPriceMax));
 
             if (!string.IsNullOrEmpty(order.Observation) && order.Observation.Length > ValidationLimits.OrderObservationMaxLength)
                 return rs.SetError(Messages.Error.FieldTooLong("observación", ValidationLimits.OrderObservationMaxLength));
@@ -617,12 +677,17 @@ namespace LaNata_Api.Core.Services
             if (requestProducts.Any(x => x == null || x.ProductId <= 0))
                 return rs.SetError(Messages.Error.FieldGraterThanZero("producto"));
 
-            if (requestProducts.Any(x => x.Quantity <= 0 || x.Quantity > ValidationLimits.OrderQuantityMax))
+            if (requestProducts.Any(x => x.Quantity <= 0))
                 return rs.SetError(Messages.Error.FieldGraterThanZero("cantidad"));
 
-            if (useRequestedUnitPrices && requestProducts.Any(x => x.UnitPrice.HasValue
-                && (x.UnitPrice.Value <= 0 || x.UnitPrice.Value > ValidationLimits.ProductPriceMax)))
+            if (requestProducts.Any(x => x.Quantity > ValidationLimits.OrderQuantityMax))
+                return rs.SetError(Messages.Error.FieldMax("cantidad", ValidationLimits.OrderQuantityMax));
+
+            if (useRequestedUnitPrices && requestProducts.Any(x => x.UnitPrice.HasValue && x.UnitPrice.Value <= 0))
                 return rs.SetError(Messages.Error.InvalidField("precio unitario"));
+
+            if (useRequestedUnitPrices && requestProducts.Any(x => x.UnitPrice > ValidationLimits.ProductPriceMax))
+                return rs.SetError(Messages.Error.FieldMax("precio unitario", ValidationLimits.ProductPriceMax));
 
             var productIds = requestProducts.Select(x => x.ProductId).Distinct().ToList();
             var products = await _db.Product.Where(x => productIds.Contains(x.Id)).ToListAsync();
@@ -630,41 +695,78 @@ namespace LaNata_Api.Core.Services
             if (products.Count != productIds.Count)
                 return rs.SetError(Messages.Error.EntityNotFound("Producto"));
 
+            var variantIds = requestProducts
+                .Where(x => x.VariantId.HasValue)
+                .Select(x => x.VariantId.Value)
+                .Distinct()
+                .ToList();
+
+            // IgnoreQueryFilters on purpose: an order being re-saved may hold a line on a variant
+            // that was retired since, and loading it with the filter on would make an otherwise
+            // innocent edit unsavable. Same class of bug as the soft deleted product behind a line.
+            var variants = variantIds.Count == 0
+                ? []
+                : await _db
+                    .ProductVariant
+                    .IgnoreQueryFilters()
+                    .Where(x => variantIds.Contains(x.Id))
+                    .ToListAsync();
+
+            if (variants.Count != variantIds.Count)
+                return rs.SetError(Messages.Error.EntityNotFound("Variante", femine: true));
+
+            if (requestProducts.Any(x => x.VariantId.HasValue
+                && variants.First(v => v.Id == x.VariantId.Value).ProductId != x.ProductId))
+                return rs.SetError(Messages.Error.VariantNotFromProduct());
+
             var resolvedLines = requestProducts
                 .Select(x =>
                 {
                     var product = products.First(p => p.Id == x.ProductId);
+                    var variant = x.VariantId.HasValue ? variants.First(v => v.Id == x.VariantId.Value) : null;
+
                     return new
                     {
                         Product = product,
+                        Variant = variant,
                         x.Quantity,
                         UnitPrice = useRequestedUnitPrices && x.UnitPrice.HasValue
                             ? x.UnitPrice.Value
-                            : product.Price
+                            : product.Price + (variant?.PriceExtra ?? 0)
                     };
                 })
                 .ToList();
 
-            // Availability belongs to the product, not to a product-price line. All prices for the
-            // same product are summed before comparing against stock.
+            var reserved = await GetReservations(productIds, variantIds, date, excludeOrderId);
+
             foreach (var productGroup in resolvedLines.GroupBy(x => x.Product.Id))
             {
                 var product = productGroup.First().Product;
                 var requestedQuantity = productGroup.Sum(x => (long)x.Quantity);
 
-                var available = await GetAvailableStock(product, date, excludeOrderId);
-                if (requestedQuantity > available)
+                if (requestedQuantity > product.Stock - reserved.ForProduct(product.Id))
                     return rs.SetError(Messages.Error.ProductWithoutStock());
             }
 
+            foreach (var variantGroup in resolvedLines.Where(x => x.Variant != null).GroupBy(x => x.Variant.Id))
+            {
+                var variant = variantGroup.First().Variant;
+                var requestedQuantity = variantGroup.Sum(x => (long)x.Quantity);
+
+                if (requestedQuantity > variant.Stock - reserved.ForVariant(variant.Id))
+                    return rs.SetError(Messages.Error.VariantWithoutStock(variant.Description));
+            }
+
             var lines = resolvedLines
-                .GroupBy(x => new { x.Product.Id, x.UnitPrice })
+                .GroupBy(x => new { x.Product.Id, x.UnitPrice, VariantId = x.Variant == null ? (int?)null : x.Variant.Id })
                 .Select(x => new ProductOrder
                 {
                     ProductId = x.Key.Id,
                     Product = x.First().Product,
                     Quantity = x.Sum(line => line.Quantity),
-                    UnitPrice = x.Key.UnitPrice
+                    UnitPrice = x.Key.UnitPrice,
+                    VariantId = x.Key.VariantId,
+                    Variant = x.First().Variant
                 })
                 .ToList();
 
@@ -694,22 +796,82 @@ namespace LaNata_Api.Core.Services
         #endregion
 
         #region Helpers
-        // What is left of a product on an event date once the orders of that day are discounted.
-        private async Task<int> GetAvailableStock(Product product, DateTime date, int? excludeOrderId)
+        private async Task<BaseResponse> SetPaid(int id, bool paid)
         {
+            var rs = new BaseResponse();
+
+            if (id <= 0)
+                return rs.SetError(Messages.Error.FieldGraterThanZero("id"));
+
+            var order = await _db.Order.FirstOrDefaultAsync(x => x.Id == id);
+            if (order == null)
+                return rs.SetError(Messages.Error.EntityNotFound("Pedido"));
+
+            if (paid && order.PaidAt.HasValue)
+                return rs.SetError(Messages.Error.OrderAlreadyPaid());
+
+            if (!paid && !order.PaidAt.HasValue)
+                return rs.SetError(Messages.Error.OrderNotPaid());
+
+            var previous = order.Clone();
+
+            order.PaidAt = paid ? DateTime.UtcNow : null;
+            order.PaidBy = paid ? _tokenService.TryGetToken()?.UserId : null;
+
+            try
+            {
+                await _db.SaveChangesAsync();
+            }
+            catch (Exception)
+            {
+                return rs.SetError(Messages.Error.Exception());
+            }
+
+            await Audit(
+                paid ? AuditActionCode.ORDER_PAID : AuditActionCode.ORDER_UNPAID,
+                order,
+                BuildAuditChanges(AuditChangeList.For(previous, order)));
+
+            rs.Message = paid ? Messages.CRUD.EntityPaid("Pedido") : Messages.CRUD.EntityUnpaid("Pedido");
+            return rs;
+        }
+
+        // What is left of a product on an event date once the orders of that day are discounted.
+        // Two round trips whatever the order holds, rather than one query per product. ExcludeOrderId
+        // leaves the order being edited out of the count, so its own reservation does not block it.
+        private async Task<StockReservation> GetReservations(List<int> productIds, List<int> variantIds, DateTime date, int? excludeOrderId)
+        {
+            var reservation = new StockReservation();
+
+            if (productIds.Count == 0)
+                return reservation;
+
             var dayStart = date.Date;
             var dayEnd = dayStart.AddDays(1);
 
             // Navigating through x.Order applies the soft-delete query filter, so cancelled orders release the stock they had reserved
-            var reserved = await _db
+            var query = _db
                 .ProductOrder
-                .Where(x => x.ProductId == product.Id
-                    && x.Order.Date >= dayStart
+                .Where(x => x.Order.Date >= dayStart
                     && x.Order.Date < dayEnd
-                    && (!excludeOrderId.HasValue || x.OrderId != excludeOrderId.Value))
-                .SumAsync(x => (int?)x.Quantity) ?? 0;
+                    && (!excludeOrderId.HasValue || x.OrderId != excludeOrderId.Value));
 
-            return product.Stock - reserved;
+            reservation.ByProduct = await query
+                .Where(x => productIds.Contains(x.ProductId))
+                .GroupBy(x => x.ProductId)
+                .Select(x => new { ProductId = x.Key, Quantity = x.Sum(line => line.Quantity) })
+                .ToDictionaryAsync(x => x.ProductId, x => x.Quantity);
+
+            if (variantIds.Count == 0)
+                return reservation;
+
+            reservation.ByVariant = await query
+                .Where(x => x.VariantId.HasValue && variantIds.Contains(x.VariantId.Value))
+                .GroupBy(x => x.VariantId.Value)
+                .Select(x => new { VariantId = x.Key, Quantity = x.Sum(line => line.Quantity) })
+                .ToDictionaryAsync(x => x.VariantId, x => x.Quantity);
+
+            return reservation;
         }
 
         private static DateTime NormalizeEventDate(DateTime date)
@@ -819,7 +981,22 @@ namespace LaNata_Api.Core.Services
                 .ToDictionaryAsync(x => x.Id);
         }
 
-        private static GetOneResponse MapOrder(Order order, Dictionary<int, Product> products)
+        private async Task<Dictionary<int, ProductVariant>> LoadLineVariants(IEnumerable<ProductOrder> lines)
+        {
+            var ids = lines.Where(x => x.VariantId.HasValue).Select(x => x.VariantId.Value).Distinct().ToList();
+
+            if (ids.Count == 0)
+                return [];
+
+            return await _db
+                .ProductVariant
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .Where(x => ids.Contains(x.Id))
+                .ToDictionaryAsync(x => x.Id);
+        }
+
+        private static GetOneResponse MapOrder(Order order, Dictionary<int, Product> products, Dictionary<int, ProductVariant> variants)
         {
             var productsTotal = order.Products.Sum(x => x.Quantity * x.UnitPrice);
 
@@ -834,20 +1011,29 @@ namespace LaNata_Api.Core.Services
                 Observation = order.Observation,
                 ProductsTotal = productsTotal,
                 Total = productsTotal + (order.ShipmentPrice ?? 0),
+                PaidAt = order.PaidAt,
+                PaidByEmail = order.PaidByUser?.Email,
                 CreatedAt = order.CreatedAt,
                 UpdatedAt = order.UpdatedAt,
                 Products = [.. order.Products
-                    .Select(x => MapOrderProduct(x, products.GetValueOrDefault(x.ProductId)))
-                    .OrderBy(x => x.Description)]
+                    .Select(x => MapOrderProduct(
+                        x,
+                        products.GetValueOrDefault(x.ProductId),
+                        x.VariantId.HasValue ? variants.GetValueOrDefault(x.VariantId.Value) : null))
+                    .OrderBy(x => x.Description)
+                    .ThenBy(x => x.VariantDescription)]
             };
         }
 
-        private static OrderProductResponse MapOrderProduct(ProductOrder line, Product product)
+        private static OrderProductResponse MapOrderProduct(ProductOrder line, Product product, ProductVariant variant)
         {
             return new OrderProductResponse
             {
+                Id = line.Id,
                 ProductId = line.ProductId,
                 Description = product?.Description,
+                VariantId = line.VariantId,
+                VariantDescription = variant?.Description,
                 Quantity = line.Quantity,
                 UnitPrice = line.UnitPrice,
                 BreakPrice = product?.BreakPrice,
@@ -870,6 +1056,9 @@ namespace LaNata_Api.Core.Services
 
             if (rq.DateTo.HasValue)
                 filters.Add(new ReportField("Hasta", rq.DateTo.Value.ToString("dd/MM/yyyy")));
+
+            if (rq.Paid.HasValue)
+                filters.Add(new ReportField("Cobro", rq.Paid.Value ? "Cobrados" : "Pendientes"));
 
             if (!string.IsNullOrWhiteSpace(rq.Search))
                 filters.Add(new ReportField("Búsqueda", rq.Search));
@@ -899,6 +1088,9 @@ namespace LaNata_Api.Core.Services
                 var dateTo = rq.DateTo.Value.Date.AddDays(1);
                 query = query.Where(x => x.Date < dateTo);
             }
+
+            if (rq.Paid.HasValue)
+                query = rq.Paid.Value ? query.Where(x => x.PaidAt != null) : query.Where(x => x.PaidAt == null);
 
             if (!string.IsNullOrWhiteSpace(rq.Search))
             {

@@ -17,7 +17,10 @@ namespace LaNata_Api.Core.DAL.DB
         public DbSet<Migration> Migration { get; set; }
         public DbSet<Role> Role { get; set; }
         public DbSet<User> User { get; set; }
+        public DbSet<Category> Category { get; set; }
         public DbSet<Product> Product { get; set; }
+        public DbSet<ProductVariant> ProductVariant { get; set; }
+        public DbSet<ProductPriceHistory> ProductPriceHistory { get; set; }
         public DbSet<Order> Order { get; set; }
         public DbSet<ProductOrder> ProductOrder { get; set; }
         public DbSet<Expense> Expense { get; set; }

@@ -10,6 +10,7 @@ namespace LaNata_Api.Core.Models.Internal
         public DateTime DateTo { get; set; }
         public decimal TotalExpenses { get; set; }
         public decimal TotalIncome { get; set; }
+        public decimal TotalIncomePaid { get; set; }
         public decimal Profit => TotalIncome - TotalExpenses;
         public List<BalanceExpenseRow> Expenses { get; set; } = [];
         public List<BalanceIncomeRow> Income { get; set; } = [];
@@ -31,5 +32,6 @@ namespace LaNata_Api.Core.Models.Internal
         public string EventAddress { get; set; }
         public decimal? ShipmentPrice { get; set; }
         public decimal Total { get; set; }
+        public DateTime? PaidAt { get; set; }
     }
 }

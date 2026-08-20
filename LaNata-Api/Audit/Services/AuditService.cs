@@ -126,8 +126,6 @@ namespace LaNata_Api.Audit.Services
                         UserName = x.UserName,
                         UserEmail = x.UserEmail
                     })
-                    .Skip((rq.Page - 1) * Pagination.DefaultPageSize)
-                    .Take(Pagination.DefaultPageSize)
                     .ToListAsync()
             };
 
@@ -210,9 +208,9 @@ namespace LaNata_Api.Audit.Services
         #region Private
         private static string ValidateGetAllRequest(GetAllRequest rq)
         {
-            var paginationError = ServiceRequestValidator.ValidatePagination(rq);
-            if (paginationError != null)
-                return paginationError;
+            var sortError = ServiceRequestValidator.ValidateSort(rq);
+            if (sortError != null)
+                return sortError;
 
             if (rq.DateFrom.HasValue && rq.DateTo.HasValue && rq.DateFrom > rq.DateTo)
                 return Messages.Error.InvalidDateRange();

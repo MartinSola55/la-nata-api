@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace LaNata_Api.Core.Models.Constants
 {
     public class Messages
@@ -49,6 +51,13 @@ namespace LaNata_Api.Core.Models.Constants
                 return "El campo " + fieldName + " debe tener menos de " + maxLength + " caracteres.";
             }
 
+            public static string FieldMax(string fieldName, decimal max)
+            {
+                var value = max.ToString("#,##0", CultureInfo.InvariantCulture).Replace(",", ".");
+
+                return "El campo " + fieldName + " no puede superar " + value + ".";
+            }
+
             public static string InvalidField(string fieldName)
             {
                 return "El campo " + fieldName + " no es válido.";
@@ -69,9 +78,44 @@ namespace LaNata_Api.Core.Models.Constants
                 return "El producto no cuenta con suficiente stock.";
             }
 
+            public static string CategoryInUse()
+            {
+                return "No se puede eliminar la categoría porque tiene productos asociados.";
+            }
+
+            public static string VariantWithoutStock(string variantName)
+            {
+                return "La variante \"" + variantName + "\" no cuenta con suficiente stock.";
+            }
+
+            public static string VariantNotFromProduct()
+            {
+                return "La variante seleccionada no pertenece al producto.";
+            }
+
+            public static string VariantInUse(string variantName)
+            {
+                return "No se puede eliminar la variante \"" + variantName + "\" porque está reservada en pedidos futuros.";
+            }
+
+            public static string TooManyVariants(int max)
+            {
+                return "Un producto no puede tener más de " + max + " variantes.";
+            }
+
             public static string OrderWithoutProducts()
             {
                 return "No hay ningún producto cargado en el pedido.";
+            }
+
+            public static string OrderAlreadyPaid()
+            {
+                return "El pedido ya figura como cobrado.";
+            }
+
+            public static string OrderNotPaid()
+            {
+                return "El pedido no figura como cobrado.";
             }
 
             public static string InvalidPassword()
@@ -125,6 +169,16 @@ namespace LaNata_Api.Core.Models.Constants
             public static string EntityDeleted(string entityName, bool femine = false)
             {
                 return entityName + " eliminad" + (femine ? "a" : "o") + " correctamente.";
+            }
+
+            public static string EntityPaid(string entityName, bool femine = false)
+            {
+                return entityName + " marcad" + (femine ? "a" : "o") + " como cobrad" + (femine ? "a" : "o") + ".";
+            }
+
+            public static string EntityUnpaid(string entityName, bool femine = false)
+            {
+                return "Se anuló el cobro de" + (femine ? " la " : "l ") + entityName.ToLower() + ".";
             }
         }
 
