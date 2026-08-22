@@ -22,13 +22,13 @@ jobs:
           dotnet-version: "10.0.x"
 
       - name: Restore dependencies
-        run: dotnet restore la-nata-api.sln
+        run: dotnet restore LaNata-Api.sln
 
       - name: Build (Release)
-        run: dotnet build la-nata-api.sln --configuration Release --no-restore
+        run: dotnet build LaNata-Api.sln --configuration Release --no-restore
 
       - name: Publish
-        run: dotnet publish la-nata-api/la-nata-api.csproj --configuration Release --no-build --output "${{ github.workspace }}/publish"
+        run: dotnet publish LaNata-Api/LaNata-Api.csproj --configuration Release --no-build --output "${{ github.workspace }}/publish"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

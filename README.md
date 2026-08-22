@@ -568,13 +568,13 @@ dotnet build LaNata-Api.sln
 
 ## Deployment (GitHub Actions to Azure App Service)
 
-This repository ships with no deploy workflow by default. To set up auto-deploy from a branch (e.g. `master` or `main`) to an Azure App Service, follow the steps below.
+The workflow lives at `.github/workflows/deploy.yml`, already wired to this project: it triggers on pushes to `master` (plus manual `workflow_dispatch`), builds `LaNata-Api.sln`, publishes `LaNata-Api/LaNata-Api.csproj` and deploys to the `lanata-api` App Service. The steps below document how it is set up, and are what to follow when pointing it at another App Service or branch.
 
 The result: every push to the trigger branch builds the project and deploys it to Azure. SQL migrations run automatically at app startup via `MigrationRunner.Run()`, so no extra step is required for the database.
 
 ### 1. Create the workflow file
 
-Add a file at `.github/workflows/deploy.yml` with the following content. Replace `<APP_NAME>` with your Azure App Service name and `<BRANCH>` with the branch you want to deploy from.
+The file already exists at `.github/workflows/deploy.yml`. For another environment, copy the content below and replace `<APP_NAME>` with the Azure App Service name and `<BRANCH>` with the branch to deploy from.
 
 ```yaml
 name: Build and deploy ASP.NET Core app to Azure Web App - <APP_NAME>
@@ -675,7 +675,7 @@ If Deployment Center was previously configured for the App Service (Local Git, B
 
 ### 6. First run
 
-Commit and push the workflow file to the trigger branch. The first run starts automatically. After it completes, every subsequent push to that branch will redeploy the app.
+Push to the trigger branch, or launch it by hand from the **Actions** tab (`Run workflow`). After the first run completes, every subsequent push to that branch redeploys the app.
 
 ### Notes
 
