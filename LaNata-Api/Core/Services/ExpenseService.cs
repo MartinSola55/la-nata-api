@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -440,7 +440,7 @@ namespace LaNata_Api.Core.Services
             var income = await _db
                 .Order
                 .AsNoTracking()
-                .Where(x => x.Date >= dateFrom && x.Date < rangeEnd)
+                .Where(x => x.Date >= dateFrom && x.Date < rangeEnd && !x.IsDraft)
                 .Select(x => new BalanceIncomeRow
                 {
                     Id = x.Id,

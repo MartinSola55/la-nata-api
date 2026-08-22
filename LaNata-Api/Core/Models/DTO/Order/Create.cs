@@ -11,8 +11,8 @@ namespace LaNata_Api.Core.Models.DTO.Order
         public DateTime Date { get; set; }
         public decimal? ShipmentPrice { get; set; }
         public string Observation { get; set; }
+        public bool IsDraft { get; set; }
 
-        // Replaces the legacy session basket: the whole order arrives in a single call
         public List<OrderProductRequest> Products { get; set; } = [];
     }
 
@@ -30,6 +30,7 @@ namespace LaNata_Api.Core.Models.DTO.Order
         public string ClientName { get; set; }
         public DateTime Date { get; set; }
         public decimal Total { get; set; }
+        public bool IsDraft { get; set; }
         public List<OrderProductResponse> Products { get; set; } = [];
     }
 }

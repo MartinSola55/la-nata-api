@@ -22,7 +22,7 @@ namespace LaNata_Api.Core.Models
         [Precision(18, 2)]
         public decimal? ShipmentPrice { get; set; }
         public string Observation { get; set; }
-
+        public bool IsDraft { get; set; }
         public DateTime? PaidAt { get; set; }
         public int? PaidBy { get; set; }
 

@@ -274,6 +274,15 @@ These are the rules the legacy app enforced. Keep them when touching products or
 - `RepriceSummary` keeps the re-priced counts **split by variant**, so each row reports the lines its own change caused instead of every row repeating the same total. `Track` accumulates while re-pricing; `For` is the read-only lookup used when the rows are built.
 - Reading the log resolves variant names through `LoadVariantNames`, with `IgnoreQueryFilters()`. It is a historical row pointing at a soft-deletable master — the same rule as the variants behind an order line.
 
+### A draft reserves nothing until it is confirmed
+
+- `Order.IsDraft` is a quote waiting for the client to accept it. The row holds everything a real order holds, but **every availability query skips it**: `OrderService.GetReservations`, `ProductService.GetStock` and `ProductService.ValidateStockCoverage` all filter `!x.Order.IsDraft`. Adding a new place that counts reservations means adding that predicate too.
+- `Create` takes `IsDraft` from the request and passes `validateStock: !order.IsDraft` to `BuildOrderProducts`; `Update` derives the same flag from the stored order. **`Update` never changes `IsDraft`** — a quote becomes an order only through `Confirm`, which is the path that checks the stock.
+- `OrderService.Confirm` is the single write path for the flag, and the only moment a draft's lines are measured. `GetMissingStock` reports **every** shortage at once — product ceiling and variant ceiling, each as its own row with requested vs available — because sending the user back one product per attempt is the re-quoting pain the flag exists to remove. The list travels in `Data` alongside the error, which `BaseResponse<T>.SetError` allows since it returns `this`.
+- There is no un-confirm. A confirmed order that falls through is deleted like any other; adding a way back would silently release stock somebody else may already have booked.
+- A draft is **excluded from the balance**, billed and collected alike, and its PDF prints as `PRESUPUESTO`. It is **not** excluded from `RepriceOpenOrders`: an unaccepted quote should follow the catalogue rather than hold a price nobody agreed to yet.
+- Drafts still count for `Product.Delete` and `ReconcileVariants`. They reserve nothing, but retiring a product or variant a draft holds would leave that draft impossible to confirm — the same dead end by another route.
+
 ### Payment state freezes an order
 
 - `Order.PaidAt` / `PaidBy` are written by `OrderService.MarkAsPaid` / `MarkAsUnpaid`, not by `AuditInterceptor`, which only stamps `AuditableEntity` columns.
@@ -349,6 +358,7 @@ return entityName + " cread" + (femine ? "a" : "o") + " correctamente.";
   - `09_Product_Variants.sql` — `ProductVariant`, `ProductOrder.VariantId`, and the surrogate-key rebuild
   - `10_Drop_Numeric_Check_Constraints.sql` — removes every numeric `CHECK`; the bounds move to `ValidationLimits` alone
   - `11_Price_History_Variants.sql` — `ProductPriceHistory.VariantId`/`PreviousPriceExtra`/`NewPriceExtra`, so a variant surcharge change gets its own row
+  - `12_Order_Draft.sql` — `Order.IsDraft` and the `ORDER_CONFIRMED` audit action seed
 - **Migrations run against the live database, so every statement must be additive and idempotent.** Guard each one with `IF COL_LENGTH(...) IS NULL` or `IF NOT EXISTS`, so a rerun is a no-op. No `ALTER COLUMN`, no `DROP`, no rename, no `UPDATE` of existing rows.
 - Migrations `04`, `05`, `09` and `10` break that rule on purpose, each after weighing the alternative. `10` is the cheap kind: a `CHECK` is metadata, so dropping one rewrites no data, takes only a brief schema lock, and can never invalidate an existing row. `09` is the one to be careful with: it rebuilds `PK_ProductOrder` on a table holding every order line ever written. If a change ever looks like it needs the same, raise it rather than writing it, and when it does go ahead: full backup, rehearsal on a restored copy, and preferably a manual run in a maintenance window with `Database:RunSqlMigrations` set to `false`.
 - **`MigrationRunner` sends each file as a single batch** (`ExecuteSqlRawAsync`, no `GO`), and T-SQL resolves column names of an already existing table at compile time. A statement that names a column added earlier **in the same file** fails with "Invalid column name" and rolls the whole file back. Wrap those in `EXEC sys.sp_executesql N'...'` — `05`, `07`, `08` and `09` all do.
@@ -402,7 +412,7 @@ The `Audit` library has two independent halves. Do not mix them up.
 - `AuditService.Audit` never throws: it validates the request, returns a `BaseResponse` error on failure, and must not be allowed to break the operation that triggered it.
 - The write uses its own `APIContext` built from the injected `DbContextOptions<APIContext>`, so calling `Audit(...)` never flushes the caller's pending changes. The flip side is that it commits on its own connection: an audit entry written inside a transaction that later rolls back still persists. Call `Audit(...)` after the business `SaveChangesAsync`.
 - Adding an action code means adding the constant in `AuditActionCode` **and** seeding the row in a SQL migration — `AuditEntry.ActionCode` has a foreign key to `audit.AuditAction`. Entity codes in `AuditEntityCode` are free strings and need no migration.
-- Current action codes: `CREATED`, `UPDATED`, `DELETED`, `ORDER_PAID`, `ORDER_UNPAID`, `LOGIN`, `LOGIN_FAILED`, `PASSWORD_CHANGED`, `EXPORTED`, `REPORT_GENERATED`.
+- Current action codes: `CREATED`, `UPDATED`, `DELETED`, `ORDER_CONFIRMED`, `ORDER_PAID`, `ORDER_UNPAID`, `LOGIN`, `LOGIN_FAILED`, `PASSWORD_CHANGED`, `EXPORTED`, `REPORT_GENERATED`.
 - `audit.AuditEntry.UserId` is deliberately **not** a foreign key to `dbo.User`, so audit history survives user deletion and audit writes never take locks on operational tables. `UserName` / `UserEmail` are denormalized copies taken from the token.
 
 ### Building the change summary
@@ -442,6 +452,7 @@ Both libraries follow the audit rule: nothing is included implicitly, the callin
 - Reuse the components in `Report/Helpers/Components/` rather than composing raw QuestPDF in a report. Colors and spacing come from `ReportColors` and `ReportDimensions`, never hardcoded.
 - Reports are capped at `ReportLimits.MaxRows`, lower than the export cap because PDF layout is far more expensive. Past that, an export is the right tool.
 - The order detail prints with or without prices from one column set: `ReportColumns.AddIf(withPrice, ...)` drops the price columns. The shipment is rendered as one more row through `OrderReportRow`, the way the legacy view did it. Do not fork the document into two.
+- `ReportOptions.Note` prints a boxed remark under the table, for a commercial clause the document has to carry. The quote uses it for its validity: `CompanyInfo.BudgetValidityDays` (15) days from issue. The note spells out the deadline date rather than saying "desde su emisión" alone, because the detail documents override `FooterNote` with the address and so never print the generation stamp the client would count from.
 
 ### Controllers
 

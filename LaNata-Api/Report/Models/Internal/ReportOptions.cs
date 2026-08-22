@@ -27,6 +27,8 @@ namespace LaNata_Api.Report.Models.Internal
 
         public string FooterNote { get; set; }
 
+        public string Note { get; set; }
+
         public byte[] Logo { get; set; }
         public List<string> ContactLines { get; set; } = [];
         public byte[] WhatsAppQr { get; set; }

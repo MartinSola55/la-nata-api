@@ -11,5 +11,8 @@ namespace LaNata_Api.Core.Models.Constants
         public const string Address = Street + " - " + City;
         public const string Phone = "03404-420949 / 15458425";
         public const string FooterNote = Name + " - Todos los derechos reservados ©";
+
+        // How long a quote holds its prices. Printed on the budget PDF so the client sees the deadline
+        public const int BudgetValidityDays = 15;
     }
 }

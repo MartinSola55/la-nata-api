@@ -291,12 +291,10 @@ namespace LaNata_Api.Core.Services
             if (rq == null || rq.Id <= 0)
                 return rs.SetError(Messages.Error.FieldGraterThanZero("id"));
 
-            // Included so the trail keeps the variants the product had when it was removed
             var product = await _db.Product.Include(x => x.Variants).FirstOrDefaultAsync(x => x.Id == rq.Id);
             if (product == null)
                 return rs.SetError(Messages.Error.EntityNotFound("Producto"));
 
-            // Retired, its lines stay pointing at it and the order can no longer be saved
             var today = DateTime.UtcNow.Date;
             if (await _db.ProductOrder.AnyAsync(x => x.ProductId == product.Id && x.Order.Date >= today))
                 return rs.SetError(Messages.Error.ProductInUse());
@@ -366,9 +364,9 @@ namespace LaNata_Api.Core.Services
             return rs;
         }
 
-        // Availability for an event date: catalogue stock minus everything the orders of that day
-        // already reserve. ExcludeOrderId leaves the order being edited out of the count, so its own
-        // reservation does not look like someone else's.
+        // Availability for an event date: catalogue stock minus everything the confirmed orders of
+        // that day already reserve. ExcludeOrderId leaves the order being edited out of the count, so
+        // its own reservation does not look like someone else's, and a draft never counts at all.
         public async Task<BaseResponse<GetStockResponse>> GetStock(GetStockRequest rq)
         {
             var rs = new BaseResponse<GetStockResponse>();
@@ -408,6 +406,7 @@ namespace LaNata_Api.Core.Services
                         Reserved = x.Orders
                             .Where(po => po.Order.Date >= dayStart
                                 && po.Order.Date < dayEnd
+                                && !po.Order.IsDraft
                                 && (!rq.ExcludeOrderId.HasValue || po.OrderId != rq.ExcludeOrderId.Value))
                             .Sum(po => (int?)po.Quantity) ?? 0,
                         Variants = x.Variants
@@ -421,6 +420,7 @@ namespace LaNata_Api.Core.Services
                                 Reserved = v.Orders
                                     .Where(po => po.Order.Date >= dayStart
                                         && po.Order.Date < dayEnd
+                                        && !po.Order.IsDraft
                                         && (!rq.ExcludeOrderId.HasValue || po.OrderId != rq.ExcludeOrderId.Value))
                                     .Sum(po => (int?)po.Quantity) ?? 0
                             })
@@ -743,7 +743,9 @@ namespace LaNata_Api.Core.Services
             return rs;
         }
 
-        // Only reductions: one already oversold has to stay correctable upwards
+        // Only reductions: one already oversold has to stay correctable upwards. Drafts are ignored
+        // here for the same reason they are ignored everywhere else: they reserve nothing, so they
+        // cannot be what an event day no longer fits.
         private async Task<BaseResponse> ValidateStockCoverage(Product product, Product previous, List<ProductVariant> previousVariants)
         {
             var rs = new BaseResponse();
@@ -753,7 +755,7 @@ namespace LaNata_Api.Core.Services
             {
                 var reserved = await _db
                     .ProductOrder
-                    .Where(x => x.ProductId == product.Id && x.Order.Date >= today)
+                    .Where(x => x.ProductId == product.Id && x.Order.Date >= today && !x.Order.IsDraft)
                     .GroupBy(x => x.Order.Date.Date)
                     .Select(x => new { Date = x.Key, Quantity = x.Sum(line => line.Quantity) })
                     .ToListAsync();
@@ -779,7 +781,7 @@ namespace LaNata_Api.Core.Services
 
             var reservations = await _db
                 .ProductOrder
-                .Where(x => x.VariantId.HasValue && variantIds.Contains(x.VariantId.Value) && x.Order.Date >= today)
+                .Where(x => x.VariantId.HasValue && variantIds.Contains(x.VariantId.Value) && x.Order.Date >= today && !x.Order.IsDraft)
                 .GroupBy(x => new { VariantId = x.VariantId.Value, Date = x.Order.Date.Date })
                 .Select(x => new { x.Key.VariantId, x.Key.Date, Quantity = x.Sum(line => line.Quantity) })
                 .ToListAsync();
@@ -913,6 +915,8 @@ namespace LaNata_Api.Core.Services
 
             // Load every eligible line once. The exact old effective price check is done below with
             // the surcharge that belonged to that line's variant before the product update.
+            // Drafts are in scope on purpose: an unaccepted quote should follow the catalogue rather
+            // than hold a price nobody agreed to yet.
             var lines = await _db
                 .ProductOrder
                 .Where(x => x.ProductId == product.Id

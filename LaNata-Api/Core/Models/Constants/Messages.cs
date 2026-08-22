@@ -124,6 +124,21 @@ namespace LaNata_Api.Core.Models.Constants
                 return "No hay ningún producto cargado en el pedido.";
             }
 
+            public static string OrderAlreadyConfirmed()
+            {
+                return "El pedido ya está confirmado.";
+            }
+
+            public static string OrderWithoutStockToConfirm()
+            {
+                return "No se puede confirmar el pedido: no hay stock suficiente en la fecha del evento.";
+            }
+
+            public static string OrderDraftCannotBePaid()
+            {
+                return "No se puede cobrar un presupuesto sin confirmar.";
+            }
+
             public static string OrderAlreadyPaid()
             {
                 return "El pedido ya figura como cobrado.";
@@ -197,6 +212,11 @@ namespace LaNata_Api.Core.Models.Constants
                 return entityName + " eliminad" + (femine ? "a" : "o") + " correctamente.";
             }
 
+            public static string EntityConfirmed(string entityName, bool femine = false)
+            {
+                return entityName + " confirmad" + (femine ? "a" : "o") + " correctamente.";
+            }
+
             public static string EntityPaid(string entityName, bool femine = false)
             {
                 return entityName + " marcad" + (femine ? "a" : "o") + " como cobrad" + (femine ? "a" : "o") + ".";
@@ -205,6 +225,15 @@ namespace LaNata_Api.Core.Models.Constants
             public static string EntityUnpaid(string entityName, bool femine = false)
             {
                 return "Se anuló el cobro de" + (femine ? " la " : "l ") + entityName.ToLower() + ".";
+            }
+        }
+
+        public class Report
+        {
+            public static string BudgetValidity(int days, string validUntil)
+            {
+                return "Este presupuesto tiene una validez de " + days + " días corridos desde su emisión, por lo que vence el "
+                    + validUntil + ". Pasada esa fecha los precios pueden variar y debe solicitarse un nuevo presupuesto.";
             }
         }
 

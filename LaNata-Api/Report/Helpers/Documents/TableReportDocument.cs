@@ -20,6 +20,19 @@ namespace LaNata_Api.Report.Helpers.Documents
 
                 column.Item().Component(new ReportTableComponent<T>(_request.Columns, _rows, _request.StripedRows));
 
+                if (!string.IsNullOrWhiteSpace(_options.Note))
+                {
+                    column.Item()
+                        .PaddingTop(ReportDimensions.SpacingMd)
+                        .Background(ReportColors.ToColor(ReportColors.PrimarySoft))
+                        .Border(ReportDimensions.BorderThin)
+                        .BorderColor(ReportColors.ToColor(ReportColors.Border))
+                        .Padding(ReportDimensions.SpacingMd)
+                        .Text(_options.Note)
+                        .FontSize(ReportDimensions.FontSm)
+                        .FontColor(ReportColors.ToColor(ReportColors.TextSecondary));
+                }
+
                 if (!_options.ShowRowCount)
                     return;
 

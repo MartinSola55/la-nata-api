@@ -51,6 +51,12 @@ namespace LaNata_Api.Core.Controllers
         }
 
         [HttpPost]
+        public async Task<BaseResponse<ConfirmResponse>> Confirm([FromBody] ConfirmRequest rq)
+        {
+            return await _orderService.Confirm(rq);
+        }
+
+        [HttpPost]
         public async Task<BaseResponse> MarkAsPaid([FromBody] MarkAsPaidRequest rq)
         {
             return await _orderService.MarkAsPaid(rq);

@@ -61,7 +61,7 @@ Migration `04` renamed every column to PascalCase and `Rol` to `Role`, so the C#
 | `Product` | `Product` | `Description`, `Stock`, `Price`, `BreakPrice`, `CategoryId` |
 | `ProductVariant` | `ProductVariant` | `ProductId`, `Description`, `Stock`, `PriceExtra` — a variant with its own stock |
 | `ProductPriceHistory` | `ProductPriceHistory` | append-only log of price changes, product and variant, and what each one did to the open orders |
-| `Order` | `Order` | `ClientName`, `Phone`, `EventAddress`, `Date`, `ShipmentPrice`, `Observation`, `PaidAt`, `PaidBy` |
+| `Order` | `Order` | `ClientName`, `Phone`, `EventAddress`, `Date`, `ShipmentPrice`, `Observation`, `IsDraft`, `PaidAt`, `PaidBy` |
 | `ProductOrder` | `ProductOrder` | order line; surrogate `Id`, unique on `(ProductId, OrderId, UnitPrice, VariantId)` |
 | `Expense` | `Expense` | `Date`, `Description`, `Price` |
 | `Role` | `Role` | two rows: `Administrador` and `Empleado` |
@@ -137,6 +137,26 @@ Every movement leaves a log row: one for the product when its price or break pri
 
 `ProductOrder` has no `deleted_at`, so this rewrites rows with no undo. The predicate is the whole safety of the operation — rehearse any change to it against a restored copy.
 
+### A draft holds no stock
+
+`Order.IsDraft` marks a quote that is waiting for the client to say yes. The row is a complete order — client, event date, the whole line set — but **every availability query skips it**, so nothing it lists is taken away from whoever books the same day first. `Order/Create` accepts `isDraft`, and while an order is a draft neither `Create` nor `Update` measures its lines against the date.
+
+`Order/Confirm` is what turns it into a real order, and the only moment its lines are checked. It reports the **whole** shortage at once rather than the first one it hits:
+
+```json
+{ "error": { "message": "No se puede confirmar el pedido: no hay stock suficiente en la fecha del evento.", "code": 400 },
+  "data": { "id": 42, "missing": [
+    { "productId": 1, "description": "Silla plastica blanca", "variantId": null, "variantDescription": null,
+      "requestedQuantity": 60, "availableStock": 45 }
+  ] } }
+```
+
+Sending the client back one product per attempt is exactly what makes re-quoting painful, which is the problem the flag exists to solve: the quote is created once, sent, and days later confirmed with a single call instead of being retyped.
+
+There is no way back. Confirming is audited as `ORDER_CONFIRMED`; a confirmed order that falls through is deleted like any other.
+
+The listing filters on `isDraft` and returns it on every row. A draft is excluded from the balance — billed and collected alike — because nobody has accepted it yet, and its PDF prints as **PRESUPUESTO**. It is *not* excluded from re-pricing: an unaccepted quote follows the catalogue rather than holding a price nobody agreed to. `Product/Delete` and variant retirement still count drafts, since retiring something a draft holds would leave it impossible to confirm.
+
 ### Payment freezes an order
 
 `Order/MarkAsPaid` and `Order/MarkAsUnpaid` stamp `PaidAt` / `PaidBy`. A paid order stays editable on purpose — fixing a typo should not require cancelling the charge. The order listing filters on `paid`, and the balance reports billed and collected income side by side.
@@ -179,10 +199,11 @@ POST /api/Order/Create                  Header + line list in one call
 POST /api/Order/Update                  Header + the whole line set, reconciled
 POST /api/Order/Delete
 POST /api/Order/GetDates                Days holding orders, for the calendar
+POST /api/Order/Confirm                 Draft -> order; the one stock check, reports every shortage
 POST /api/Order/MarkAsPaid              Freezes the order against price changes
 POST /api/Order/MarkAsUnpaid
 POST /api/Order/Report                  PDF detail, with or without prices
-POST /api/Order/Budget                  PDF quote for an order not yet created
+POST /api/Order/Budget                  PDF quote for an order not yet created, valid 15 days
 POST /api/Order/ExportExcel
 
 POST /api/Expense/GetAll                By date range
@@ -337,6 +358,7 @@ LaNata-Api/Core/DAL/Migrations
   09_Product_Variants.sql                     ProductVariant and the ProductOrder key rebuild
   10_Drop_Numeric_Check_Constraints.sql       Numeric bounds move out of the database into the API
   11_Price_History_Variants.sql               ProductPriceHistory rows for a variant surcharge change
+  12_Order_Draft.sql                          Order.IsDraft, so a quote can be saved without reserving
 ```
 
 Scripts are executed in filename order. Each executed filename is stored in `_Migrations`, so each script runs once. New scripts keep the numeric prefix (`10_Add_New_Feature.sql`).

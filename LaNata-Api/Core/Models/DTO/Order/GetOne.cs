@@ -19,6 +19,7 @@ namespace LaNata_Api.Core.Models.DTO.Order
         public string Observation { get; set; }
         public decimal ProductsTotal { get; set; }
         public decimal Total { get; set; }
+        public bool IsDraft { get; set; }
         public DateTime? PaidAt { get; set; }
         public string PaidByEmail { get; set; }
         public DateTime CreatedAt { get; set; }

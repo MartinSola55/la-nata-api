@@ -28,6 +28,8 @@ namespace LaNata_Api.Core.Services
     {
         private const string ShipmentRowDescription = "Flete";
         private const string NoVariant = "Sin variante";
+        private const string DraftStateName = "Presupuesto";
+        private const string ConfirmedStateName = "Confirmado";
 
         // Every one of the 2200 rows already in production stores the event day at 12:00, because the
         // legacy app added 12 hours to dodge a timezone problem in its date input. New rows keep the
@@ -71,6 +73,7 @@ namespace LaNata_Api.Core.Services
                             Observation = x.Observation,
                             ProductsCount = x.Products.Count,
                             Total = x.Products.Sum(p => p.Quantity * p.UnitPrice) + (x.ShipmentPrice ?? 0),
+                            IsDraft = x.IsDraft,
                             PaidAt = x.PaidAt,
                             PaidByEmail = x.PaidByUser.Email,
                             CreatedAt = x.CreatedAt
@@ -115,13 +118,16 @@ namespace LaNata_Api.Core.Services
                 EventAddress = rq.EventAddress?.Trim(),
                 Date = NormalizeEventDate(rq.Date),
                 ShipmentPrice = rq.ShipmentPrice,
-                Observation = rq.Observation?.Trim()
+                Observation = rq.Observation?.Trim(),
+                IsDraft = rq.IsDraft
             };
 
             if (!rs.Attach(ValidateOrder<CreateResponse>(order)).Success)
                 return rs;
 
-            var linesResponse = await BuildOrderProducts(rq.Products, order.Date);
+            // A draft reserves nothing, so it is not measured against the date. Confirm is where the
+            // availability is checked, and it reports every shortage at once instead of the first
+            var linesResponse = await BuildOrderProducts(rq.Products, order.Date, validateStock: !order.IsDraft);
             if (!linesResponse.Success)
                 return rs.SetError(linesResponse.Error.Message);
 
@@ -139,13 +145,14 @@ namespace LaNata_Api.Core.Services
 
             await Audit(AuditActionCode.CREATED, order, BuildCreateAuditChanges(order));
 
-            rs.Message = Messages.CRUD.EntityCreated("Pedido");
+            rs.Message = Messages.CRUD.EntityCreated(EntityName(order));
             rs.Data = new CreateResponse
             {
                 Id = order.Id,
                 ClientName = order.ClientName,
                 Date = order.Date,
                 Total = CalculateTotal(order),
+                IsDraft = order.IsDraft,
                 Products = [.. order.Products.Select(x => MapOrderProduct(x, x.Product, x.Variant))]
             };
 
@@ -179,7 +186,9 @@ namespace LaNata_Api.Core.Services
             if (!rs.Attach(ValidateOrder(order)).Success)
                 return rs;
 
-            var linesResponse = await BuildOrderProducts(rq.Products, order.Date, order.Id, useRequestedUnitPrices: true);
+            // IsDraft is not part of the request: a quote becomes an order through Confirm, which is
+            // the path that checks the stock. Editing a draft leaves it a draft.
+            var linesResponse = await BuildOrderProducts(rq.Products, order.Date, order.Id, useRequestedUnitPrices: true, validateStock: !order.IsDraft);
             if (!linesResponse.Success)
                 return rs.SetError(linesResponse.Error.Message);
 
@@ -218,7 +227,7 @@ namespace LaNata_Api.Core.Services
 
             await Audit(AuditActionCode.UPDATED, order, auditChanges);
 
-            rs.Message = Messages.CRUD.EntityUpdated("Pedido");
+            rs.Message = Messages.CRUD.EntityUpdated(EntityName(order));
             return rs;
         }
 
@@ -247,7 +256,7 @@ namespace LaNata_Api.Core.Services
 
             await Audit(AuditActionCode.DELETED, order, BuildAuditChanges(AuditChangeList.ForDeleted(order)));
 
-            rs.Message = Messages.CRUD.EntityDeleted("Pedido");
+            rs.Message = Messages.CRUD.EntityDeleted(EntityName(order));
             return rs;
         }
         #endregion
@@ -287,6 +296,54 @@ namespace LaNata_Api.Core.Services
             return rs;
         }
 
+        public async Task<BaseResponse<ConfirmResponse>> Confirm(ConfirmRequest rq)
+        {
+            var rs = new BaseResponse<ConfirmResponse>();
+
+            if (rq == null || rq.Id <= 0)
+                return rs.SetError(Messages.Error.FieldGraterThanZero("id"));
+
+            var order = await _db
+                .Order
+                .Include(x => x.Products)
+                .FirstOrDefaultAsync(x => x.Id == rq.Id);
+
+            if (order == null)
+                return rs.SetError(Messages.Error.EntityNotFound("Pedido"));
+
+            if (!order.IsDraft)
+                return rs.SetError(Messages.Error.OrderAlreadyConfirmed());
+
+            if (order.Products.Count == 0)
+                return rs.SetError(Messages.Error.OrderWithoutProducts());
+
+            var missing = await GetMissingStock(order);
+            if (missing.Count > 0)
+            {
+                rs.Data = new ConfirmResponse { Id = order.Id, Missing = missing };
+                return rs.SetError(Messages.Error.OrderWithoutStockToConfirm());
+            }
+
+            var previous = order.Clone();
+
+            order.IsDraft = false;
+
+            try
+            {
+                await _db.SaveChangesAsync();
+            }
+            catch (Exception)
+            {
+                return rs.SetError(Messages.Error.Exception());
+            }
+
+            await Audit(AuditActionCode.ORDER_CONFIRMED, order, BuildAuditChanges(AuditChangeList.For(previous, order)));
+
+            rs.Message = Messages.CRUD.EntityConfirmed("Pedido");
+            rs.Data = new ConfirmResponse { Id = order.Id };
+            return rs;
+        }
+
         public async Task<BaseResponse> MarkAsPaid(MarkAsPaidRequest rq)
         {
             return await SetPaid(rq?.Id ?? 0, true);
@@ -315,6 +372,7 @@ namespace LaNata_Api.Core.Services
                 .Add(x => x.EventAddress, "Dirección", width: 40)
                 .Add(x => x.Date, "Fecha", ExportValueFormat.Date)
                 .Add(x => x.Products.Count, "Productos", ExportValueFormat.Integer)
+                .Add("Estado", x => x.IsDraft ? DraftStateName : ConfirmedStateName)
                 .Add(x => x.ShipmentPrice, "Flete", ExportValueFormat.Currency)
                 .Add("Total", x => CalculateTotal(x), ExportValueFormat.Currency)
                 .Add(x => x.PaidAt, "Cobrado", ExportValueFormat.DateTime)
@@ -384,7 +442,12 @@ namespace LaNata_Api.Core.Services
             if (!rq.WithPrice)
                 fields.Insert(0, new ReportField("Pedido Nº", order.Id.ToString()));
 
-            rs = GenerateDetailReport(rows, rq.WithPrice, "pedido_" + order.Id, fields);
+            // A draft is the document that gets sent to the client to be approved, so it prints as a
+            // presupuesto and says so; confirming it is what turns the same rows into a pedido
+            if (order.IsDraft)
+                fields.Add(new ReportField("Estado", DraftStateName + " pendiente de confirmación"));
+
+            rs = GenerateDetailReport(rows, rq.WithPrice, "pedido_" + order.Id, fields, isBudget: order.IsDraft);
 
             if (rs.Success)
             {
@@ -463,12 +526,16 @@ namespace LaNata_Api.Core.Services
 
             var rows = AppendShipmentRow([.. productRows.OrderBy(x => x.Description)], rq.ShipmentPrice);
 
+            // The footer of this document prints the address instead of the generation stamp, so the
+            // note carries the deadline itself rather than pointing at a date the client cannot see
+            var validUntil = DateTime.UtcNow.Date.AddDays(CompanyInfo.BudgetValidityDays).ToString("dd/MM/yyyy");
+
             rs = GenerateDetailReport(rows, withPrice: true, "presupuesto", new List<ReportField>
             {
                 new("Cliente", rq.ClientName?.Trim() ?? "-"),
                 new("Fecha", rq.Date == default ? "-" : rq.Date.ToString("dd/MM/yyyy")),
                 new("Lugar", rq.EventAddress?.Trim() ?? "-")
-            });
+            }, Messages.Report.BudgetValidity(CompanyInfo.BudgetValidityDays, validUntil), isBudget: true);
 
             if (rs.Success)
             {
@@ -492,6 +559,7 @@ namespace LaNata_Api.Core.Services
                 .AddField(x => x.Date, "Fecha", AuditFormat.Date)
                 .AddField(x => x.ShipmentPrice, "Flete", AuditFormat.Currency)
                 .AddField(x => x.Observation, "Observación")
+                .AddField(x => x.IsDraft, "Presupuesto", AuditFormat.YesNo)
                 .AddField(x => x.PaidAt, "Cobro", AuditFormat.Date)
                 .Build();
         }
@@ -682,11 +750,68 @@ namespace LaNata_Api.Core.Services
             return validation.Error == null ? rs : rs.SetError(validation.Error.Message);
         }
 
+        // Both ceilings for an order already saved, reported in full rather than stopping at the first
+        // shortage. Products and variants are resolved with the soft-delete filter off, the same as
+        // every other read of what an order line points at.
+        private async Task<List<ConfirmResponse.MissingStockItem>> GetMissingStock(Order order)
+        {
+            var lines = order.Products;
+            var products = await LoadLineProducts(lines);
+            var variants = await LoadLineVariants(lines);
+
+            var productIds = lines.Select(x => x.ProductId).Distinct().ToList();
+            var variantIds = lines.Where(x => x.VariantId.HasValue).Select(x => x.VariantId.Value).Distinct().ToList();
+
+            var reserved = await GetReservations(productIds, variantIds, order.Date, order.Id);
+            var missing = new List<ConfirmResponse.MissingStockItem>();
+
+            foreach (var group in lines.GroupBy(x => x.ProductId))
+            {
+                var product = products.GetValueOrDefault(group.Key);
+                var requested = group.Sum(x => x.Quantity);
+                var available = (product?.Stock ?? 0) - reserved.ForProduct(group.Key);
+
+                if (requested > available)
+                {
+                    missing.Add(new ConfirmResponse.MissingStockItem
+                    {
+                        ProductId = group.Key,
+                        Description = product?.Description ?? "Producto #" + group.Key,
+                        RequestedQuantity = requested,
+                        AvailableStock = available
+                    });
+                }
+            }
+
+            foreach (var group in lines.Where(x => x.VariantId.HasValue).GroupBy(x => new { x.ProductId, VariantId = x.VariantId.Value }))
+            {
+                var variant = variants.GetValueOrDefault(group.Key.VariantId);
+                var requested = group.Sum(x => x.Quantity);
+                var available = (variant?.Stock ?? 0) - reserved.ForVariant(group.Key.VariantId);
+
+                if (requested > available)
+                {
+                    missing.Add(new ConfirmResponse.MissingStockItem
+                    {
+                        ProductId = group.Key.ProductId,
+                        Description = products.GetValueOrDefault(group.Key.ProductId)?.Description ?? "Producto #" + group.Key.ProductId,
+                        VariantId = group.Key.VariantId,
+                        VariantDescription = variant?.Description ?? "Variante #" + group.Key.VariantId,
+                        RequestedQuantity = requested,
+                        AvailableStock = available
+                    });
+                }
+            }
+
+            return [.. missing.OrderBy(x => x.Description).ThenBy(x => x.VariantDescription)];
+        }
+
         private async Task<BaseResponse<List<ProductOrder>>> BuildOrderProducts(
             List<OrderProductRequest> requestProducts,
             DateTime date,
             int? excludeOrderId = null,
-            bool useRequestedUnitPrices = false)
+            bool useRequestedUnitPrices = false,
+            bool validateStock = true)
         {
             var rs = new BaseResponse<List<ProductOrder>>();
 
@@ -756,24 +881,27 @@ namespace LaNata_Api.Core.Services
                 })
                 .ToList();
 
-            var reserved = await GetReservations(productIds, variantIds, date, excludeOrderId);
-
-            foreach (var productGroup in resolvedLines.GroupBy(x => x.Product.Id))
+            if (validateStock)
             {
-                var product = productGroup.First().Product;
-                var requestedQuantity = productGroup.Sum(x => (long)x.Quantity);
+                var reserved = await GetReservations(productIds, variantIds, date, excludeOrderId);
 
-                if (requestedQuantity > product.Stock - reserved.ForProduct(product.Id))
-                    return rs.SetError(Messages.Error.ProductWithoutStock());
-            }
+                foreach (var productGroup in resolvedLines.GroupBy(x => x.Product.Id))
+                {
+                    var product = productGroup.First().Product;
+                    var requestedQuantity = productGroup.Sum(x => (long)x.Quantity);
 
-            foreach (var variantGroup in resolvedLines.Where(x => x.Variant != null).GroupBy(x => x.Variant.Id))
-            {
-                var variant = variantGroup.First().Variant;
-                var requestedQuantity = variantGroup.Sum(x => (long)x.Quantity);
+                    if (requestedQuantity > product.Stock - reserved.ForProduct(product.Id))
+                        return rs.SetError(Messages.Error.ProductWithoutStock());
+                }
 
-                if (requestedQuantity > variant.Stock - reserved.ForVariant(variant.Id))
-                    return rs.SetError(Messages.Error.VariantWithoutStock(variant.Description));
+                foreach (var variantGroup in resolvedLines.Where(x => x.Variant != null).GroupBy(x => x.Variant.Id))
+                {
+                    var variant = variantGroup.First().Variant;
+                    var requestedQuantity = variantGroup.Sum(x => (long)x.Quantity);
+
+                    if (requestedQuantity > variant.Stock - reserved.ForVariant(variant.Id))
+                        return rs.SetError(Messages.Error.VariantWithoutStock(variant.Description));
+                }
             }
 
             var lines = resolvedLines
@@ -826,6 +954,10 @@ namespace LaNata_Api.Core.Services
             if (order == null)
                 return rs.SetError(Messages.Error.EntityNotFound("Pedido"));
 
+            // Nothing to collect on a quote nobody has accepted yet
+            if (paid && order.IsDraft)
+                return rs.SetError(Messages.Error.OrderDraftCannotBePaid());
+
             if (paid && order.PaidAt.HasValue)
                 return rs.SetError(Messages.Error.OrderAlreadyPaid());
 
@@ -855,9 +987,10 @@ namespace LaNata_Api.Core.Services
             return rs;
         }
 
-        // What is left of a product on an event date once the orders of that day are discounted.
-        // Two round trips whatever the order holds, rather than one query per product. ExcludeOrderId
-        // leaves the order being edited out of the count, so its own reservation does not block it.
+        // What is left of a product on an event date once the confirmed orders of that day are
+        // discounted. Two round trips whatever the order holds, rather than one query per product.
+        // ExcludeOrderId leaves the order being edited out of the count, so its own reservation does
+        // not block it. Drafts are skipped: a quote holds nothing until somebody confirms it.
         private async Task<StockReservation> GetReservations(List<int> productIds, List<int> variantIds, DateTime date, int? excludeOrderId)
         {
             var reservation = new StockReservation();
@@ -873,6 +1006,7 @@ namespace LaNata_Api.Core.Services
                 .ProductOrder
                 .Where(x => x.Order.Date >= dayStart
                     && x.Order.Date < dayEnd
+                    && !x.Order.IsDraft
                     && (!excludeOrderId.HasValue || x.OrderId != excludeOrderId.Value));
 
             reservation.ByProduct = await query
@@ -914,7 +1048,7 @@ namespace LaNata_Api.Core.Services
             return await query.ToListAsync();
         }
 
-        private BaseResponse<ReportFile> GenerateDetailReport(List<OrderReportRow> rows, bool withPrice, string fileName, List<ReportField> fields)
+        private BaseResponse<ReportFile> GenerateDetailReport(List<OrderReportRow> rows, bool withPrice, string fileName, List<ReportField> fields, string note = null, bool isBudget = false)
         {
             var columns = ReportColumns
                 .For<OrderReportRow>()
@@ -938,7 +1072,7 @@ namespace LaNata_Api.Core.Services
                 {
                     Title = CompanyInfo.Name,
                     Subtitle = CompanyInfo.Slogan + Environment.NewLine + CompanyInfo.Tagline,
-                    DocumentTitle = "DETALLE",
+                    DocumentTitle = isBudget ? "PRESUPUESTO" : "DETALLE",
                     Logo = ReportAssets.Read("logo.png"),
                     ContactLines =
                     [
@@ -950,6 +1084,7 @@ namespace LaNata_Api.Core.Services
                     FooterNote = CompanyInfo.Address + " - Tel: " + CompanyInfo.Phone,
                     WhatsAppQr = withPrice ? ReportAssets.Read("qr_wpp.png") : null,
                     InstagramQr = withPrice ? ReportAssets.Read("qr_ig.png") : null,
+                    Note = note,
                     Filters = fields,
                     Summary = summary,
                     ShowRowCount = false
@@ -978,6 +1113,13 @@ namespace LaNata_Api.Core.Services
         private static string Currency(decimal value)
         {
             return value.ToString("C2", ReportCulture.Current);
+        }
+
+        // A draft is called "presupuesto" everywhere the user reads it, so the confirmation toast of a
+        // quote does not talk about a pedido that does not exist yet
+        private static string EntityName(Order order)
+        {
+            return order.IsDraft ? DraftStateName : "Pedido";
         }
 
         private static decimal CalculateTotal(Order order)
@@ -1030,6 +1172,7 @@ namespace LaNata_Api.Core.Services
                 Observation = order.Observation,
                 ProductsTotal = productsTotal,
                 Total = productsTotal + (order.ShipmentPrice ?? 0),
+                IsDraft = order.IsDraft,
                 PaidAt = order.PaidAt,
                 PaidByEmail = order.PaidByUser?.Email,
                 CreatedAt = order.CreatedAt,
@@ -1079,6 +1222,9 @@ namespace LaNata_Api.Core.Services
             if (rq.Paid.HasValue)
                 filters.Add(new ReportField("Cobro", rq.Paid.Value ? "Cobrados" : "Pendientes"));
 
+            if (rq.IsDraft.HasValue)
+                filters.Add(new ReportField("Estado", rq.IsDraft.Value ? DraftStateName : ConfirmedStateName));
+
             if (!string.IsNullOrWhiteSpace(rq.Search))
                 filters.Add(new ReportField("Búsqueda", rq.Search));
 
@@ -1110,6 +1256,12 @@ namespace LaNata_Api.Core.Services
 
             if (rq.Paid.HasValue)
                 query = rq.Paid.Value ? query.Where(x => x.PaidAt != null) : query.Where(x => x.PaidAt == null);
+
+            if (rq.IsDraft.HasValue)
+            {
+                var isDraft = rq.IsDraft.Value;
+                query = query.Where(x => x.IsDraft == isDraft);
+            }
 
             if (!string.IsNullOrWhiteSpace(rq.Search))
             {
