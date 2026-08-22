@@ -16,7 +16,7 @@ namespace LaNata_Api.Core.DAL
 
         public async Task Run()
         {
-            if (!_config.GetValue("Database:RunSqlMigrations", true))
+            if (!_config.GetValue("Database:RunSqlMigrations", false))
                 return;
 
             await EnsureMigrationTableExists();
