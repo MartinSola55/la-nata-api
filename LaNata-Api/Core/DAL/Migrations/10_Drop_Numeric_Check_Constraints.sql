@@ -22,6 +22,14 @@
 -- The last four names below come from migrations 08 and 09. They are listed so a database that
 -- already ran those from an earlier checkout ends up in the same state as one that never did.
 
+-- Every comparison against sys.check_constraints.name is forced to Latin1_General_BIN2 on both
+-- sides, the same way migration 04 matches sys.columns.name. The database collation is
+-- Modern_Spanish_CI_AS while the catalog views carry the server/catalog collation
+-- (SQL_Latin1_General_CP1_CI_AS on Azure SQL), and a table variable column or a local variable takes
+-- the database default, so an unqualified equality between the two raises "Cannot resolve the
+-- collation conflict" and rolls the whole file back. A binary collation is also the correct
+-- semantics here: these are identifiers, matched exactly.
+
 DECLARE @numericConstraints TABLE (
     ConstraintName SYSNAME NOT NULL
 );
@@ -50,7 +58,7 @@ DECLARE @dropSql NVARCHAR(MAX);
 WHILE EXISTS (
     SELECT 1
     FROM @numericConstraints c
-    JOIN sys.check_constraints k ON k.name = c.ConstraintName
+    JOIN sys.check_constraints k ON k.name COLLATE Latin1_General_BIN2 = c.ConstraintName COLLATE Latin1_General_BIN2
 )
 BEGIN
     SELECT TOP 1
@@ -58,7 +66,7 @@ BEGIN
         @schemaName = SCHEMA_NAME(t.schema_id),
         @tableName = t.name
     FROM @numericConstraints c
-    JOIN sys.check_constraints k ON k.name = c.ConstraintName
+    JOIN sys.check_constraints k ON k.name COLLATE Latin1_General_BIN2 = c.ConstraintName COLLATE Latin1_General_BIN2
     JOIN sys.tables t ON t.object_id = k.parent_object_id;
 
     SET @dropSql =
@@ -67,5 +75,6 @@ BEGIN
 
     EXEC sys.sp_executesql @dropSql;
 
-    DELETE FROM @numericConstraints WHERE ConstraintName = @constraintName;
+    DELETE FROM @numericConstraints
+    WHERE ConstraintName COLLATE Latin1_General_BIN2 = @constraintName COLLATE Latin1_General_BIN2;
 END
