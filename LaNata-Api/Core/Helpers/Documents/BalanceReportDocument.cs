@@ -61,10 +61,10 @@ namespace LaNata_Api.Core.Helpers.Documents
         {
             return ReportColumns
                 .For<BalanceIncomeRow>()
-                .Add(x => x.ClientName, "Cliente", width: 2)
-                .Add(x => x.EventAddress, "Dirección", width: 2)
+                .Add(x => x.ClientName, "Cliente", width: 1.7f)
+                .Add(x => x.EventAddress, "Dirección", width: 1.7f)
                 .AddDate(x => x.Date, "Fecha")
-                .Add(x => x.ShipmentPrice.HasValue ? Currency(x.ShipmentPrice.Value) : "-", "Flete", ReportAlignment.Right)
+                .Add(x => x.ShipmentPrice.HasValue ? Currency(x.ShipmentPrice.Value) : "-", "Flete", ReportAlignment.Right, ReportDimensions.ColumnWidthMoney)
                 .AddCurrency(x => x.Total, "Monto")
                 .Add(x => x.PaidAt.HasValue ? "Cobrado" : "Pendiente", "Cobro", ReportAlignment.Center)
                 .Build();

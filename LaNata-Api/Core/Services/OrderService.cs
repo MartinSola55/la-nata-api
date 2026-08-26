@@ -19,6 +19,7 @@ using LaNata_Api.Export.Models.Constants;
 using LaNata_Api.Export.Models.Internal;
 using LaNata_Api.Export.Services;
 using LaNata_Api.Report.Helpers;
+using LaNata_Api.Report.Models.Constants;
 using LaNata_Api.Report.Models.Internal;
 using LaNata_Api.Report.Services;
 
@@ -1054,9 +1055,9 @@ namespace LaNata_Api.Core.Services
                 .For<OrderReportRow>()
                 .Add(x => x.Description, "Producto", width: 3)
                 .AddNumber(x => x.Quantity, "Cantidad")
-                .AddIf(withPrice, x => Currency(x.UnitPrice), "Precio unitario", ReportAlignment.Right)
-                .AddIf(withPrice, x => x.BreakPrice.HasValue ? Currency(x.BreakPrice.Value) : "-", "Precio por rotura", ReportAlignment.Right)
-                .AddIf(withPrice, x => Currency(x.Subtotal), "Subtotal", ReportAlignment.Right)
+                .AddIf(withPrice, x => Currency(x.UnitPrice), "Precio unitario", ReportAlignment.Right, ReportDimensions.ColumnWidthMoney)
+                .AddIf(withPrice, x => x.BreakPrice.HasValue ? Currency(x.BreakPrice.Value) : "-", "Precio por rotura", ReportAlignment.Right, ReportDimensions.ColumnWidthMoney)
+                .AddIf(withPrice, x => Currency(x.Subtotal), "Subtotal", ReportAlignment.Right, ReportDimensions.ColumnWidthMoney)
                 .Build();
 
             var summary = new List<ReportField>();

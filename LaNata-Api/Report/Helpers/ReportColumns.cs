@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using LaNata_Api.Report.Models.Constants;
 using LaNata_Api.Report.Models.Internal;
 
 namespace LaNata_Api.Report.Helpers
@@ -43,12 +44,12 @@ namespace LaNata_Api.Report.Helpers
             return Add(row => Format(value(row), format), header, ReportAlignment.Right, width);
         }
 
-        public ReportColumns<T> AddCurrency(Func<T, object> value, string header, float width = 1f, string emptyText = "")
+        public ReportColumns<T> AddCurrency(Func<T, object> value, string header, float width = ReportDimensions.ColumnWidthMoney, string emptyText = "")
         {
             return Add(row => value(row) == null ? emptyText : Format(value(row), "C2"), header, ReportAlignment.Right, width);
         }
 
-        public ReportColumns<T> AddDate(Func<T, object> value, string header, bool withTime = false, float width = 1f)
+        public ReportColumns<T> AddDate(Func<T, object> value, string header, bool withTime = false, float width = ReportDimensions.ColumnWidthDate)
         {
             var pattern = withTime ? "dd/MM/yyyy HH:mm" : "dd/MM/yyyy";
 

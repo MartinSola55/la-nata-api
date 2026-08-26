@@ -10,6 +10,8 @@ namespace LaNata_Api.Report.Helpers.Components
     {
         private const int COLUMNS_PER_ROW = 4;
 
+        private const int HIGHLIGHT_COLUMNS_PER_ROW = 2;
+
         private readonly List<ReportField> _fields = fields;
         private readonly bool _highlight = highlight;
 
@@ -18,11 +20,13 @@ namespace LaNata_Api.Report.Helpers.Components
             if (_fields == null || _fields.Count == 0)
                 return;
 
+            var perRow = _highlight ? HIGHLIGHT_COLUMNS_PER_ROW : COLUMNS_PER_ROW;
+
             container.Column(column =>
             {
-                for (var start = 0; start < _fields.Count; start += COLUMNS_PER_ROW)
+                for (var start = 0; start < _fields.Count; start += perRow)
                 {
-                    var slice = _fields.GetRange(start, System.Math.Min(COLUMNS_PER_ROW, _fields.Count - start));
+                    var slice = _fields.GetRange(start, System.Math.Min(perRow, _fields.Count - start));
 
                     column.Item().PaddingTop(start == 0 ? 0 : ReportDimensions.SpacingSm).Row(row =>
                     {
@@ -30,7 +34,7 @@ namespace LaNata_Api.Report.Helpers.Components
                             row.RelativeItem().PaddingRight(ReportDimensions.SpacingSm).Element(cell => ComposeField(cell, field));
 
                         // Keeps the last row aligned with the ones above instead of stretching
-                        for (var i = slice.Count; i < COLUMNS_PER_ROW; i++)
+                        for (var i = slice.Count; i < perRow; i++)
                             row.RelativeItem();
                     });
                 }
@@ -40,9 +44,8 @@ namespace LaNata_Api.Report.Helpers.Components
         private void ComposeField(IContainer container, ReportField field)
         {
             container
-                .Background(ReportColors.ToColor(_highlight ? ReportColors.PrimarySoft : ReportColors.RowStripe))
-                .Border(ReportDimensions.BorderThin)
-                .BorderColor(ReportColors.ToColor(ReportColors.BorderSubtle))
+                .Border(_highlight ? ReportDimensions.BorderRegular : ReportDimensions.BorderThin)
+                .BorderColor(ReportColors.ToColor(_highlight ? ReportColors.TextPrimary : ReportColors.Border))
                 .Padding(ReportDimensions.SpacingMd)
                 .Column(column =>
                 {

@@ -512,6 +512,15 @@ var rs = _reportService.GenerateTable(new ReportTableRequest<Product>
 
 The generated page carries a header with the title, the applied filters, summary cards, the table with a repeating header, and a footer with the generation stamp and page numbers. Company details printed on every report live in `Core/Models/Constants/CompanyInfo.cs`.
 
+### Reports are printed, not read on screen
+
+Every report exists to come out of a printer, always in black and white, and nobody keeps the PDF. That decides two things about the styling, and both live in `Report/Models/Constants/`:
+
+- **No background fills anywhere.** `ReportColors` has no fill colors at all — no header band, no zebra striping, no tinted cards or note boxes. A fill prints as a gray smear and only burns toner. Hierarchy comes from size, weight and rules: the table header is bold over a thick bottom line, rows are separated by a hairline, and a summary card is a box with a heavier border. Do not reintroduce `.Background(...)` in a report.
+- **The type scale is sized for paper**, not for a screen: the table body (`FontSm`) is 11pt and nothing goes below 9pt.
+
+Bigger type costs width, which is why `ReportDimensions` also owns the relative widths of the columns whose content has a known length — `ColumnWidthMoney` and `ColumnWidthDate`, the defaults of `AddCurrency` and `AddDate`. At print size `$ 1.234.567,00` no longer fits in one relative unit and would break in two lines, so a money column added through plain `Add` should pass `ReportDimensions.ColumnWidthMoney` too.
+
 The order detail uses the same table report for both variants: `ReportColumns.AddIf` drops the price columns when `withPrice` is `false`, and the shipment is rendered as one more row (`OrderReportRow`), exactly as the legacy view did.
 
 The balance is the one report a table cannot express — it stacks the expenses table and the income table in one document — so it inherits `ReportDocumentBase` in `Core/Helpers/Documents/BalanceReportDocument.cs` and is passed to `ReportService.Generate(document, fileName)`. `ReportService.Merge` renders several documents into one PDF.

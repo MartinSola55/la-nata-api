@@ -6,11 +6,10 @@ using LaNata_Api.Report.Models.Internal;
 
 namespace LaNata_Api.Report.Helpers.Components
 {
-    public class ReportTableComponent<T>(List<ReportColumn<T>> columns, List<T> rows, bool striped = true) : IComponent
+    public class ReportTableComponent<T>(List<ReportColumn<T>> columns, List<T> rows) : IComponent
     {
         private readonly List<ReportColumn<T>> _columns = columns;
         private readonly List<T> _rows = rows;
-        private readonly bool _striped = striped;
 
         public void Compose(IContainer container)
         {
@@ -46,31 +45,26 @@ namespace LaNata_Api.Report.Helpers.Components
                     foreach (var column in _columns)
                     {
                         header.Cell()
-                            .Background(ReportColors.ToColor(ReportColors.Accent))
-                            .Padding(ReportDimensions.CellPaddingY)
+                            .BorderBottom(ReportDimensions.BorderRegular)
+                            .BorderColor(ReportColors.ToColor(ReportColors.TextPrimary))
+                            .PaddingVertical(ReportDimensions.CellPaddingY)
+                            .PaddingHorizontal(ReportDimensions.CellPaddingX)
                             .AlignmentFor(column.Alignment)
                             .Text(column.Header ?? string.Empty)
                             .FontSize(ReportDimensions.FontSm)
                             .Bold()
-                            .FontColor(ReportColors.ToColor(ReportColors.TextOnPrimary));
+                            .FontColor(ReportColors.ToColor(ReportColors.TextPrimary));
                     }
                 });
 
-                for (var rowIndex = 0; rowIndex < _rows.Count; rowIndex++)
+                foreach (var row in _rows)
                 {
-                    var row = _rows[rowIndex];
-                    var isStriped = _striped && rowIndex % 2 == 1;
-
                     foreach (var column in _columns)
                     {
-                        var cell = table.Cell()
+                        table.Cell()
                             .BorderBottom(ReportDimensions.BorderThin)
-                            .BorderColor(ReportColors.ToColor(ReportColors.BorderSubtle));
-
-                        if (isStriped)
-                            cell = cell.Background(ReportColors.ToColor(ReportColors.RowStripe));
-
-                        cell.PaddingVertical(ReportDimensions.CellPaddingY)
+                            .BorderColor(ReportColors.ToColor(ReportColors.Border))
+                            .PaddingVertical(ReportDimensions.CellPaddingY)
                             .PaddingHorizontal(ReportDimensions.CellPaddingX)
                             .AlignmentFor(column.Alignment)
                             .Text(column.Value(row) ?? string.Empty)

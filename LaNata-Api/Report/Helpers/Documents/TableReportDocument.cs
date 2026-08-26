@@ -18,13 +18,12 @@ namespace LaNata_Api.Report.Helpers.Documents
             {
                 ComposeIntro(column);
 
-                column.Item().Component(new ReportTableComponent<T>(_request.Columns, _rows, _request.StripedRows));
+                column.Item().Component(new ReportTableComponent<T>(_request.Columns, _rows));
 
                 if (!string.IsNullOrWhiteSpace(_options.Note))
                 {
                     column.Item()
                         .PaddingTop(ReportDimensions.SpacingMd)
-                        .Background(ReportColors.ToColor(ReportColors.PrimarySoft))
                         .Border(ReportDimensions.BorderThin)
                         .BorderColor(ReportColors.ToColor(ReportColors.Border))
                         .Padding(ReportDimensions.SpacingMd)
