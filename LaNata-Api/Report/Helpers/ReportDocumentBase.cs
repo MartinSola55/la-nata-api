@@ -21,7 +21,7 @@ namespace LaNata_Api.Report.Helpers
                     .FontSize(ReportDimensions.FontSm)
                     .FontColor(ReportColors.ToColor(ReportColors.TextPrimary)));
 
-                page.Header().Component(new ReportHeaderComponent(_options));
+                page.Header().ShowOnce().Component(new ReportHeaderComponent(_options));
                 page.Content().PaddingVertical(ReportDimensions.SpacingLg).Element(ComposeContent);
                 page.Footer().Component(new ReportFooterComponent(_options));
             });

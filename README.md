@@ -510,7 +510,7 @@ var rs = _reportService.GenerateTable(new ReportTableRequest<Product>
 });
 ```
 
-The generated page carries a header with the title, the applied filters, summary cards, the table with a repeating header, and a footer with the generation stamp and page numbers. Company details printed on every report live in `Core/Models/Constants/CompanyInfo.cs`.
+The generated document opens with a header carrying the logo and the contact lines, then the applied filters, the summary cards, the table with a repeating header, and a footer with the generation stamp and page numbers. The header prints **only on the first page** (`ShowOnce`), so on a multi-page listing that height goes to the table; the footer repeats, because it carries the page numbers. Company details printed on every report live in `Core/Models/Constants/CompanyInfo.cs`.
 
 ### Reports are printed, not read on screen
 
@@ -518,6 +518,7 @@ Every report exists to come out of a printer, always in black and white, and nob
 
 - **No background fills anywhere.** `ReportColors` has no fill colors at all — no header band, no zebra striping, no tinted cards or note boxes. A fill prints as a gray smear and only burns toner. Hierarchy comes from size, weight and rules: the table header is bold over a thick bottom line, rows are separated by a hairline, and a summary card is a box with a heavier border. Do not reintroduce `.Background(...)` in a report.
 - **The type scale is sized for paper**, not for a screen: the table body (`FontSm`) is 11pt and nothing goes below 9pt.
+- **The block of data above the table is kept tight.** In a filter or summary card the label and the value share one paragraph instead of being stacked, and a filter value prints at `FontSm`. Stacked at `FontMd` the cards took a third of the first page before a single row of the table appeared.
 
 Bigger type costs width, which is why `ReportDimensions` also owns the relative widths of the columns whose content has a known length — `ColumnWidthMoney` and `ColumnWidthDate`, the defaults of `AddCurrency` and `AddDate`. At print size `$ 1.234.567,00` no longer fits in one relative unit and would break in two lines, so a money column added through plain `Add` should pass `ReportDimensions.ColumnWidthMoney` too.
 

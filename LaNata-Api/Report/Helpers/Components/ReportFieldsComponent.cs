@@ -28,7 +28,7 @@ namespace LaNata_Api.Report.Helpers.Components
                 {
                     var slice = _fields.GetRange(start, System.Math.Min(perRow, _fields.Count - start));
 
-                    column.Item().PaddingTop(start == 0 ? 0 : ReportDimensions.SpacingSm).Row(row =>
+                    column.Item().PaddingTop(start == 0 ? 0 : ReportDimensions.SpacingXs).Row(row =>
                     {
                         foreach (var field in slice)
                             row.RelativeItem().PaddingRight(ReportDimensions.SpacingSm).Element(cell => ComposeField(cell, field));
@@ -46,18 +46,16 @@ namespace LaNata_Api.Report.Helpers.Components
             container
                 .Border(_highlight ? ReportDimensions.BorderRegular : ReportDimensions.BorderThin)
                 .BorderColor(ReportColors.ToColor(_highlight ? ReportColors.TextPrimary : ReportColors.Border))
-                .Padding(ReportDimensions.SpacingMd)
-                .Column(column =>
+                .PaddingVertical(ReportDimensions.SpacingXs)
+                .PaddingHorizontal(ReportDimensions.SpacingSm)
+                .Text(text =>
                 {
-                    column.Item()
-                        .Text(field.Label ?? string.Empty)
+                    text.Span((field.Label ?? string.Empty) + ": ")
                         .FontSize(ReportDimensions.FontXs)
                         .FontColor(ReportColors.ToColor(ReportColors.TextMuted));
 
-                    column.Item()
-                        .PaddingTop(ReportDimensions.SpacingXs)
-                        .Text(field.Value ?? "-")
-                        .FontSize(_highlight ? ReportDimensions.FontLg : ReportDimensions.FontMd)
+                    text.Span(field.Value ?? "-")
+                        .FontSize(_highlight ? ReportDimensions.FontLg : ReportDimensions.FontSm)
                         .SemiBold()
                         .FontColor(ReportColors.ToColor(ReportColors.TextPrimary));
                 });
