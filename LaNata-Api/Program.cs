@@ -26,8 +26,6 @@ builder.Services.AddHttpContextAccessor();
 
 var app = builder.Build();
 
-app.Logger.LogInformation("API starting; login diagnostics enabled");
-
 await DatabaseConfig.RunMigrations(app.Services);
 
 app.UseSecurityHeaders();

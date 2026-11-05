@@ -1,9 +1,7 @@
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
-using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
 using LaNata_Api.Audit.Models.Constants;
@@ -16,16 +14,14 @@ using LaNata_Api.Core.Models.DTO.Auth;
 
 namespace LaNata_Api.Core.Services
 {
-    public class AuthService(TokenService tokenService, APIContext context, AuditService auditService, ILogger<AuthService> logger)
+    public class AuthService(TokenService tokenService, APIContext context, AuditService auditService)
     {
         private readonly TokenService _tokenService = tokenService;
         private readonly APIContext _db = context;
         private readonly AuditService _auditService = auditService;
-        private readonly ILogger<AuthService> _logger = logger;
 
         public async Task<BaseResponse<LoginResponse>> Login(LoginRequest rq)
         {
-            _logger.LogInformation("Login request started");
             var rs = new BaseResponse<LoginResponse>();
 
             if (rq == null || string.IsNullOrEmpty(rq.Email) || string.IsNullOrEmpty(rq.Password))
@@ -53,21 +49,12 @@ namespace LaNata_Api.Core.Services
             }
 
             var email = rq.Email.ToLower();
-            _logger.LogInformation("Login user lookup started");
-            var stageTimer = Stopwatch.StartNew();
             var user = await _db
                 .User
                 .Include(x => x.Role)
                 .FirstOrDefaultAsync(x => x.Email == email);
 
-            _logger.LogInformation("Login user lookup completed in {ElapsedMilliseconds} ms", stageTimer.ElapsedMilliseconds);
-
-            _logger.LogInformation("Login password verification started");
-            stageTimer.Restart();
-            var passwordValid = user != null && VerifyPassword(rq.Password, user.PasswordHash);
-            _logger.LogInformation("Login password verification completed in {ElapsedMilliseconds} ms", stageTimer.ElapsedMilliseconds);
-
-            if (!passwordValid)
+            if (user == null || !VerifyPassword(rq.Password, user.PasswordHash))
             {
                 await AuditLoginFailed(email, user?.Id, "Credenciales inválidas");
                 return rs.SetError(Messages.Error.InvalidLogin());
@@ -80,10 +67,7 @@ namespace LaNata_Api.Core.Services
             }
 
             var expiration = DateTime.UtcNow.AddDays(30);
-            _logger.LogInformation("Login token generation started");
-            stageTimer.Restart();
             var token = _tokenService.GenerateToken(user, user.Role.Name, expiration);
-            _logger.LogInformation("Login token generation completed in {ElapsedMilliseconds} ms", stageTimer.ElapsedMilliseconds);
 
             if (string.IsNullOrEmpty(token))
             {
@@ -103,10 +87,7 @@ namespace LaNata_Api.Core.Services
                 }
             };
 
-            _logger.LogInformation("Login audit started");
-            stageTimer.Restart();
             await AuditLogin(user.Id, user.Email, user.Role.Name, expiration);
-            _logger.LogInformation("Login audit finished in {ElapsedMilliseconds} ms", stageTimer.ElapsedMilliseconds);
 
             return rs;
         }
