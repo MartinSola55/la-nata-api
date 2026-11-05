@@ -16,6 +16,7 @@ namespace LaNata_Api.Core.Controllers
         private readonly AuthService _authService = authService;
 
         [HttpPost]
+        [EnableRateLimiting(RateLimitPolicies.Login)]
         public async Task<BaseResponse<LoginResponse>> Login([FromBody] LoginRequest rq)
         {
             return await _authService.Login(rq);
