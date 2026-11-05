@@ -1,12 +1,15 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using LaNata_Api.Core.DAL.DB;
 using LaNata_Api.Core.Security.Config;
 using LaNata_Api.Report.Config;
 using LaNata_Api.Core.Services;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Logging.AddAzureWebAppDiagnostics();
 
 SecurityHeadersConfig.HideServerHeader(builder.WebHost);
 ReportConfig.ConfigureReporting(builder.Configuration);
@@ -22,6 +25,8 @@ builder.Services.AddControllers();
 builder.Services.AddHttpContextAccessor();
 
 var app = builder.Build();
+
+app.Logger.LogInformation("API starting; login diagnostics enabled");
 
 await DatabaseConfig.RunMigrations(app.Services);
 
