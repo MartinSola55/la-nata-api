@@ -10,15 +10,17 @@ using LaNata_Api.Core.Models.Internal;
 using LaNata_Api.Core.Services;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 
 namespace LaNata_Api.Audit.Services
 {
-    public class AuditService(APIContext context, DbContextOptions<APIContext> contextOptions, TokenService tokenService, IHttpContextAccessor httpContextAccessor)
+    public class AuditService(APIContext context, DbContextOptions<APIContext> contextOptions, TokenService tokenService, IHttpContextAccessor httpContextAccessor, ILogger<AuditService> logger)
     {
         private const int ACTION_CODE_MAX_LENGTH = 100;
         private const int ENTITY_MAX_LENGTH = 100;
@@ -32,6 +34,7 @@ namespace LaNata_Api.Audit.Services
         private readonly DbContextOptions<APIContext> _contextOptions = contextOptions;
         private readonly Token _token = tokenService.TryGetToken();
         private readonly IHttpContextAccessor _httpContextAccessor = httpContextAccessor;
+        private readonly ILogger<AuditService> _logger = logger;
 
         #region Methods
         public async Task<BaseResponse> Audit(AuditRequest rq)
@@ -50,11 +53,18 @@ namespace LaNata_Api.Audit.Services
             if (rq.Entity.Length > ENTITY_MAX_LENGTH)
                 return rs.SetError(Messages.Error.FieldTooLong("entidad", ENTITY_MAX_LENGTH));
 
+            var stage = "action lookup";
+            var stageTimer = Stopwatch.StartNew();
+
             try
             {
+                _logger.LogInformation("Audit {ActionCode}: action lookup started", rq.ActionCode);
                 if (!await _db.AuditAction.AnyAsync(x => x.ActionCode == rq.ActionCode))
                     return rs.SetError(AuditMessages.UnknownAction(rq.ActionCode));
 
+                _logger.LogInformation("Audit {ActionCode}: action lookup completed in {ElapsedMilliseconds} ms", rq.ActionCode, stageTimer.ElapsedMilliseconds);
+                stage = "entry preparation";
+                stageTimer.Restart();
                 var entry = new AuditEntry
                 {
                     Date = rq.Date ?? DateTime.UtcNow,
@@ -76,10 +86,15 @@ namespace LaNata_Api.Audit.Services
                 // flushes whatever the calling service still has pending on its own context
                 using var db = new APIContext(_contextOptions);
                 db.AuditEntry.Add(entry);
+                stage = "entry save";
+                _logger.LogInformation("Audit {ActionCode}: entry save started", rq.ActionCode);
+                stageTimer.Restart();
                 await db.SaveChangesAsync();
+                _logger.LogInformation("Audit {ActionCode}: entry save completed in {ElapsedMilliseconds} ms", rq.ActionCode, stageTimer.ElapsedMilliseconds);
             }
-            catch (Exception)
+            catch (Exception exception)
             {
+                _logger.LogError(exception, "Audit {ActionCode} failed during {Stage} after {ElapsedMilliseconds} ms", rq.ActionCode, stage, stageTimer.ElapsedMilliseconds);
                 return rs.SetError(AuditMessages.AuditException());
             }
 
