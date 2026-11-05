@@ -20,7 +20,8 @@ namespace LaNata_Api.Core.DAL.DB
 
             services.AddDbContext<APIContext>((serviceProvider, options) =>
             {
-                options.UseSqlServer(connectionString);
+                options.UseSqlServer(connectionString, sqlOptions =>
+                    sqlOptions.CommandTimeout(config.GetValue("Database:CommandTimeoutSeconds", 120)));
                 InterceptorsContainer.ConfigureInterceptors(serviceProvider, options);
             });
         }
